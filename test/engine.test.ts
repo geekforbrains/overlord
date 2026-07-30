@@ -223,6 +223,28 @@ describe("inventory and synchronization", () => {
     expect(canonical).toContain("codex: {}");
   });
 
+  it("reports every provider output planned by a dry-run agent adoption", async () => {
+    const { project, options } = await fixture();
+    const claude = join(project, ".claude/agents/reviewer.md");
+    const canonical = join(project, ".agents/overlord/agents/reviewer.md");
+    const codex = join(project, ".codex/agents/reviewer.toml");
+    const native = `---\nname: reviewer\ndescription: Reviews changes.\nmodel: opus\n---\n\nReview carefully.\n`;
+    await writeText(claude, native);
+
+    const result = await synchronize(options, {
+      dryRun: true,
+      resolutions: { "agent:reviewer@project": "adopt" },
+    });
+
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      id: "plan-adopt-agent-reviewer",
+      writes: [canonical, claude, codex],
+    }));
+    expect(await readFile(claude, "utf8")).toBe(native);
+    await expect(lstat(canonical)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(codex)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("marks unadopted files external in configuration without changing them", async () => {
     const { project, options } = await fixture();
     const native = join(project, ".claude/agents/reviewer.md");

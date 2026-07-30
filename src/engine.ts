@@ -876,16 +876,30 @@ function plannedResolvedAction(context: InventoryContext, definition: Definition
   } else if (side === "external") {
     action.writes = [configPath(context.scope.canonical)];
   } else if (side === "adopt" || side === "claude" || side === "codex") {
-    action.writes = [
-      canonicalDestination,
-      ...(definition.outputs
-        ?.filter((entry) =>
-          entry.target !== side
-          && entry.readsCanonicalDirectly !== true
-          && (definition.kind !== "agent" || isExpectedAgentOutput(context, definition.name, entry)),
-        )
-        .map((entry) => entry.path) ?? []),
-    ];
+    if (definition.kind === "agent") {
+      const canonical = canonicalByKey(context).get(key(definition.kind, definition.name)) as CanonicalAgent | undefined;
+      const preferred = side === "adopt" ? undefined : side;
+      const adopted = mergedNativeAgent(entries, preferred, canonical);
+      const available = new Set(
+        context.document.targets
+          ?.filter((target) => target.available)
+          .map((target) => target.name) ?? [],
+      );
+      const nativeDestinations = (["claude", "codex"] as const)
+        .filter((target) => available.has(target) && adopted.targets[target] !== false)
+        .map((target) => join(
+          context.paths[target].agents,
+          `${definition.name}.${target === "claude" ? "md" : "toml"}`,
+        ));
+      action.writes = [...new Set([canonicalDestination, ...nativeDestinations])];
+    } else {
+      action.writes = [
+        canonicalDestination,
+        ...(definition.outputs
+          ?.filter((entry) => entry.target !== side && entry.readsCanonicalDirectly !== true)
+          .map((entry) => entry.path) ?? []),
+      ];
+    }
     if (definition.kind === "skill") action.removes = entries.filter((entry) => entry.scanOnly === true).map((entry) => entry.path);
     else action.removes = definition.outputs
       ?.filter((entry) => !isExpectedAgentOutput(context, definition.name, entry) && entry.state !== "external")
