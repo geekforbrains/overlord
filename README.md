@@ -211,6 +211,44 @@ The name, description, and Markdown body are shared. Values below
 `targets.claude` or `targets.codex` are preserved for that provider and are not
 translated. Set a target to `false` to disable it for that agent.
 
+## Everyday workflow
+
+Overlord does not watch files or run a background service. Edit definitions in
+the canonical `.agents` directory, then synchronize and verify them explicitly:
+
+```sh
+# User-wide definitions under ~/.agents
+overlord sync --global
+overlord check --global
+
+# Definitions under the current project's .agents directory
+overlord sync
+overlord check
+```
+
+Codex reads canonical skills from `.agents/skills` directly. The sync step is
+still required to materialize Claude skills and both providers' custom agents.
+Start a new Claude or Codex session if an existing session does not reload a
+changed definition.
+
+### What if I create or edit a file under `.claude`?
+
+A new Claude-only definition is reported as `unadopted`; Overlord does not copy
+it into `.agents` automatically. Interactive `overlord sync` offers to adopt it.
+For a user-wide skill in a non-interactive workflow, inspect the plan and apply
+the exact selector returned in its `decision` field:
+
+```sh
+overlord sync --global --dry-run --json
+overlord sync --global --resolve 'skill:my-skill@user=adopt'
+overlord check --global
+```
+
+After adoption, make future edits in `.agents`. If the same definition already
+exists there with different content, Overlord reports a `conflict` and asks
+which copy should win. It never adopts, replaces, or deletes existing content
+without an explicit decision.
+
 ## Commands
 
 <!-- markdownlint-disable MD013 -->
