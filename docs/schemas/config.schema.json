@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/geekforbrains/overlord/main/docs/schemas/config.schema.json",
+  "title": "overlord.yaml",
+  "description": "Portable configuration for one Overlord canonical scope. See spec section 5.5.",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Configuration schema version."
+    },
+    "external": {
+      "type": "array",
+      "description": "Definitions visible in a native location but owned elsewhere. Scope is inferred from the configuration file containing the entry.",
+      "items": { "$ref": "#/$defs/external" }
+    }
+  },
+  "$defs": {
+    "skillName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Spec section 6: lowercase letters, digits and hyphens, with no leading, trailing, or consecutive hyphen."
+    },
+    "agentName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z]+(-[a-z]+)*$",
+      "description": "Spec section 7.3: lowercase letters and hyphens, with no leading, trailing, or consecutive hyphen."
+    },
+    "external": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["skill", "agent"] },
+        "name": { "type": "string" },
+        "target": {
+          "enum": ["claude", "codex"],
+          "description": "Required for agents. Optional for skills: omitted acknowledges native copies in both targets; supplied acknowledges only that target."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why this definition is owned elsewhere. Strongly recommended."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "kind": { "const": "agent" } },
+            "required": ["kind"]
+          },
+          "then": {
+            "required": ["target"],
+            "properties": { "name": { "$ref": "#/$defs/agentName" } }
+          },
+          "else": {
+            "properties": { "name": { "$ref": "#/$defs/skillName" } }
+          }
+        }
+      ]
+    }
+  }
+}

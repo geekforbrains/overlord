@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/geekforbrains/overlord/main/docs/schemas/output.schema.json",
+  "title": "Overlord CLI JSON output",
+  "description": "The single JSON document written to stdout by any Overlord command invoked with --json. Emitted on success and on failure alike; diagnostics and progress go to stderr. See spec section 14.",
+  "type": "object",
+  "required": ["schemaVersion", "command", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Incremented only for breaking changes to this document."
+    },
+    "overlordVersion": {
+      "type": "string",
+      "description": "Semver of the CLI that produced this document."
+    },
+    "command": {
+      "enum": ["init", "status", "check", "sync"],
+      "description": "Command family that produced this document."
+    },
+    "status": {
+      "enum": ["ok", "attention-required", "error"],
+      "description": "Result status. 'error' maps to exit 2 or 3. 'attention-required' normally maps to exit 1, except the inventory-only status command returns 0 whenever inspection completes. See spec section 13.1."
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "True when --dry-run was supplied. Nothing in action 'writes' or 'removes' was performed."
+    },
+    "error": {
+      "$ref": "#/$defs/error",
+      "description": "Present if and only if status is 'error'."
+    },
+    "scope": {
+      "$ref": "#/$defs/scope",
+      "description": "The single scope selected for this invocation. See spec sections 5.3, 12, and 14."
+    },
+    "targets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/target" },
+      "description": "Supported targets with availability observed on this machine."
+    },
+    "definitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/definition" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "timing": { "$ref": "#/$defs/timing" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "error" } }, "required": ["status"] },
+      "then": { "required": ["error"] },
+      "else": {
+        "allOf": [
+          { "not": { "required": ["error"] } },
+          { "required": ["scope"] }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "state": {
+      "enum": [
+        "synced",
+        "missing",
+        "unadopted",
+        "conflict",
+        "external",
+        "invalid"
+      ],
+      "description": "Definition state from spec section 9.2."
+    },
+    "kind": { "enum": ["skill", "agent"] },
+    "targetName": { "enum": ["claude", "codex"] },
+    "scopeType": { "enum": ["user", "project"] },
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "usage",
+            "config-invalid",
+            "scope-unresolvable",
+            "lock-held",
+            "permission-denied",
+            "internal"
+          ]
+        },
+        "message": { "type": "string" },
+        "path": {
+          "type": "string",
+          "description": "Absolute path or config key path the error concerns."
+        },
+        "detail": { "type": "string" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "description": "One scope and how it was resolved. See spec section 5.3.",
+      "required": ["type", "path", "resolvedBy"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "$ref": "#/$defs/scopeType" },
+        "path": { "type": "string", "description": "Absolute path." },
+        "canonical": {
+          "type": "string",
+          "description": "Absolute path to the .agents directory in use."
+        },
+        "resolvedBy": {
+          "enum": [
+            "explicit-flag",
+            "nearest-ancestor",
+            "git-worktree-root",
+            "user-default"
+          ]
+        },
+        "evidence": {
+          "type": "string",
+          "description": "The path or condition that produced this resolution."
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["name", "available"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/targetName" },
+        "available": {
+          "type": "boolean",
+          "description": "Detected on this machine."
+        },
+        "version": { "type": ["string", "null"] },
+        "paths": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Resolved native locations, keyed by artifact kind."
+        },
+        "observability": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Behavior this target has that Overlord cannot observe or own, e.g. built-in or organization-managed definitions. Distinguishes 'not managed' from 'not observable'."
+        }
+      }
+    },
+    "definition": {
+      "type": "object",
+      "required": ["kind", "name", "scope", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "$ref": "#/$defs/kind" },
+        "name": { "type": "string" },
+        "scope": { "$ref": "#/$defs/scopeType" },
+        "project": {
+          "type": "string",
+          "description": "Absolute project path when scope is 'project'."
+        },
+        "state": { "$ref": "#/$defs/state" },
+        "canonical": {
+          "type": ["string", "null"],
+          "description": "Absolute path in the canonical source, or null when the definition exists only natively."
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/output" }
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Why this state was assigned, e.g. 'content differs at SKILL.md', 'symlink target missing'."
+        },
+        "conflictsWith": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Absolute paths of the colliding definitions, for cross-scope and cross-location conflicts (spec 5.4, 8.2)."
+        },
+        "decision": {
+          "type": "object",
+          "description": "Present when this definition needs human judgment. Carries the exact --resolve key and the sides Overlord will accept, so a consumer never constructs a selector or guesses its options. See spec section 10.2.",
+          "required": ["selector", "options"],
+          "additionalProperties": false,
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "Fully-qualified --resolve key, e.g. 'skill:verify@user'. Pass as --resolve <selector>=<option>."
+            },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": ["agents", "claude", "codex", "adopt", "external", "delete", "skip"]
+              },
+              "description": "Unadopted definitions offer adopt, external, delete, or skip. Conflicts offer the applicable source sides or skip. A cross-scope collision (spec 5.4) has no decision object."
+            }
+          }
+        },
+        "externalReason": { "type": "string" }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["target", "path", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/targetName" },
+        "path": { "type": "string", "description": "Absolute path." },
+        "state": { "$ref": "#/$defs/state" },
+        "readsCanonicalDirectly": {
+          "type": "boolean",
+          "description": "True for Codex skills, which read the canonical source in place and are never materialized."
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Counts by state, plus first-run adoption progress.",
+      "additionalProperties": false,
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "byState": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 0 },
+          "propertyNames": { "$ref": "#/$defs/state" }
+        },
+        "managed": { "type": "integer", "minimum": 0 },
+        "adoptionComplete": {
+          "type": "boolean",
+          "description": "True when nothing remains unadopted."
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "description": "A proposed next step. Structured argv, never a shell string. A recommendation is information, not authorization.",
+      "required": ["id", "description", "argv", "mutates"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "argv": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "mutates": { "type": "boolean" },
+        "requiresConfirmation": { "type": "boolean" },
+        "requiresDecision": {
+          "type": "boolean",
+          "description": "The choice needs human judgment. Overlord will not pick a default, and an agent must surface it rather than resolve it."
+        },
+        "scope": { "$ref": "#/$defs/scopeType" },
+        "reads": { "type": "array", "items": { "type": "string" } },
+        "writes": { "type": "array", "items": { "type": "string" } },
+        "removes": { "type": "array", "items": { "type": "string" } },
+        "backups": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Recoverable backup paths created by an executed destructive action."
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "severity": { "enum": ["info", "warning", "error"] },
+        "code": {
+          "type": "string",
+          "description": "Stable identifier, e.g. 'unknown-overlay-field', 'non-portable-name', 'dangling-symlink', 'unmanaged-claude-command'."
+        },
+        "message": { "type": "string" },
+        "path": { "type": "string" },
+        "suggestion": {
+          "type": "string",
+          "description": "Correction hint, e.g. a probable-typo field name."
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "description": "Optional timing for the selected scope.",
+      "additionalProperties": false,
+      "properties": {
+        "totalMs": { "type": "number", "minimum": 0 },
+        "scanMs": { "type": "number", "minimum": 0 },
+        "compareMs": { "type": "number", "minimum": 0 },
+        "renderMs": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

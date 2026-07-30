@@ -1,0 +1,53 @@
+{
+  "name": "overlord",
+  "version": "0.1.0",
+  "description": "Keep Claude Code and Codex skills and subagents in sync from one canonical source.",
+  "type": "module",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geekforbrains/overlord.git"
+  },
+  "homepage": "https://github.com/geekforbrains/overlord#readme",
+  "bugs": {
+    "url": "https://github.com/geekforbrains/overlord/issues"
+  },
+  "keywords": [
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "subagents",
+    "ai-agents",
+    "cli"
+  ],
+  "bin": {
+    "overlord": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "docs/spec.md",
+    "docs/schemas"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "smol-toml": "1.7.1",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  },
+  "license": "MIT"
+}
