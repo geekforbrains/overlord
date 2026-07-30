@@ -1097,6 +1097,8 @@ deferred product decisions:
 - Supported Claude Code and Codex CLI version ranges, and the known-field lists
   used for typo suggestions in section 7.2.
 - Whether a later release adds project discovery or background synchronization.
+  The non-normative [auto-sync design draft](auto-sync-design.md) records the
+  current product discussion without changing the version 0.1 contract.
 - Whether a later release adds an explicit renderer migration workflow.
 - Whether `.claude/commands/` conversion is added in a later version.
 

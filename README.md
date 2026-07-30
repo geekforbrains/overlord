@@ -320,6 +320,11 @@ where supported, and recoverable backups for destructive changes.
   agent overlay fields are preserved with a warning, or rejected with
   `--strict`.
 
+The proposed watcher, unique native auto-adoption, and recursive project
+discovery behavior are recorded in the non-normative
+[auto-sync design draft](docs/auto-sync-design.md). None of that behavior is
+implemented in version 0.1.
+
 ## Development
 
 ```sh
