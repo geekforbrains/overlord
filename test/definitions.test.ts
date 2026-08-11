@@ -57,14 +57,6 @@ describe("canonical definitions", () => {
     expect(loaded.diagnostics[0]).toMatchObject({ code: "unknown-overlay-field", severity: "warning", suggestion: "tools" });
   });
 
-  it("promotes unknown overlay fields to invalid in strict mode", async () => {
-    const root = await temporaryDirectory();
-    await writeText(join(root, ".agents/overlord/agents/reviewer.md"), validAgent.replace("tools:", "tols:"));
-    const loaded = await loadCanonicalScope(join(root, ".agents"), { strict: true });
-    expect(loaded.agents[0]?.valid).toBe(false);
-    expect(loaded.diagnostics[0]?.severity).toBe("error");
-  });
-
   it("rejects target enablement values other than a mapping or false", async () => {
     const root = await temporaryDirectory();
     await writeText(
@@ -125,7 +117,35 @@ describe("canonical definitions", () => {
     await symlink(join(root, "secret.txt"), join(skill, "secret.txt"));
     const loaded = await loadCanonicalScope(join(root, ".agents"));
     expect(loaded.skills[0]?.valid).toBe(false);
-    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "unsafe-symlink" }));
+    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "unsupported-skill-symlink" }));
+  });
+
+  it("rejects skill symlinks even when they stay inside the skill directory", async () => {
+    const root = await temporaryDirectory();
+    const skill = join(root, ".agents/skills/verify-build");
+    await writeText(join(skill, "SKILL.md"), validSkill);
+    await writeText(join(skill, "references/source.md"), "source\n");
+    await symlink("source.md", join(skill, "references/current.md"));
+
+    const loaded = await loadCanonicalScope(join(root, ".agents"));
+
+    expect(loaded.skills[0]?.valid).toBe(false);
+    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "unsupported-skill-symlink" }));
+  });
+
+  it("rejects an internal symlink chain that physically escapes the skill", async () => {
+    const root = await temporaryDirectory();
+    const skills = join(root, ".agents/skills");
+    const escape = join(skills, "escape");
+    await writeText(join(escape, "SKILL.md"), validSkill.replaceAll("verify-build", "escape"));
+    await writeText(join(skills, "secret/SKILL.md"), validSkill.replaceAll("verify-build", "secret"));
+    await symlink(".", join(escape, "pivot"));
+    await symlink("pivot/../secret/SKILL.md", join(escape, "leak"));
+
+    const loaded = await loadCanonicalScope(join(root, ".agents"));
+
+    expect(loaded.skills).toContainEqual(expect.objectContaining({ name: "escape", valid: false }));
+    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "unsupported-skill-symlink" }));
   });
 
   it("reports top-level canonical definition symlinks instead of silently ignoring them", async () => {
@@ -143,5 +163,27 @@ describe("canonical definitions", () => {
     expect(loaded.skills).toContainEqual(expect.objectContaining({ name: "linked", valid: false }));
     expect(loaded.agents).toContainEqual(expect.objectContaining({ name: "reviewer", valid: false }));
     expect(loaded.diagnostics.filter((entry) => entry.code === "unsupported-canonical-symlink")).toHaveLength(2);
+  });
+
+  it("reports unsupported canonical definition entry types", async () => {
+    const root = await temporaryDirectory();
+    await writeText(join(root, ".agents/skills/broken"), "not a skill directory\n");
+    await mkdir(join(root, ".agents/overlord/agents/broken.md"), { recursive: true });
+
+    const loaded = await loadCanonicalScope(join(root, ".agents"));
+
+    expect(loaded.skills).toContainEqual(expect.objectContaining({ name: "broken", valid: false }));
+    expect(loaded.agents).toContainEqual(expect.objectContaining({ name: "broken", valid: false }));
+    expect(loaded.diagnostics.filter((entry) => entry.severity === "error").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports a canonical agent with a case-aliased Markdown extension", async () => {
+    const root = await temporaryDirectory();
+    await writeText(join(root, ".agents/overlord/agents/reviewer.MD"), validAgent);
+
+    const loaded = await loadCanonicalScope(join(root, ".agents"));
+
+    expect(loaded.agents).toContainEqual(expect.objectContaining({ name: "reviewer", valid: false }));
+    expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "non-portable-agent-extension" }));
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "overlord",
-  "version": "0.1.0",
-  "description": "Keep Claude Code and Codex skills and subagents in sync from one canonical source.",
+  "version": "0.2.0",
+  "description": "Discover and synchronize Claude Code and Codex skills and agents across user and project scopes.",
   "type": "module",
   "private": true,
   "repository": {
@@ -33,8 +33,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
-    "check": "npm run typecheck && npm test && npm run build",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "check": "npm run lint && npm run typecheck && npm test && npm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "lint": "oxlint --deny-warnings --vitest-plugin src test vitest.config.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -46,6 +48,7 @@
   },
   "devDependencies": {
     "@types/node": "22.20.1",
+    "oxlint": "1.78.0",
     "typescript": "7.0.2",
     "vitest": "4.1.10"
   },

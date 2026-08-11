@@ -1,18 +1,11 @@
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
 
-export interface ExternalEntry {
-  kind: "skill" | "agent";
-  name: string;
-  target?: "claude" | "codex";
-  reason?: string;
-}
-
 export interface OverlordConfig {
-  version: 1;
-  external: ExternalEntry[];
+  version: 2;
+  roots: string[];
 }
 
 export class ConfigError extends Error {
@@ -38,13 +31,13 @@ export function configPath(canonicalRoot: string): string {
   return join(canonicalRoot, "overlord", "overlord.yaml");
 }
 
-export async function loadConfig(canonicalRoot: string): Promise<OverlordConfig> {
+export async function loadConfig(canonicalRoot: string, home: string): Promise<OverlordConfig> {
   const path = configPath(canonicalRoot);
   let source: string;
   try {
     source = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, external: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, roots: [] };
     throw new ConfigError("Configuration cannot be read", path, error instanceof Error ? error.message : String(error));
   }
 
@@ -76,29 +69,27 @@ export async function loadConfig(canonicalRoot: string): Promise<OverlordConfig>
     );
   }
 
-  const config = parsed as { version: 1; external?: ExternalEntry[] };
-  return { version: 1, external: config.external ?? [] };
+  const config = parsed as { version: 2; roots?: string[] };
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, configuredRoot] of (config.roots ?? []).entries()) {
+    const homeRelative = configuredRoot.startsWith("~/");
+    if (!homeRelative && !isAbsolute(configuredRoot)) {
+      throw new ConfigError(
+        `Configuration is invalid at /roots/${index}`,
+        path,
+        "Discovery roots must be absolute paths or start with '~/'.",
+      );
+    }
+    const normalizedRoot = resolve(homeRelative ? join(home, configuredRoot.slice(2)) : configuredRoot);
+    if (seen.has(normalizedRoot)) continue;
+    seen.add(normalizedRoot);
+    roots.push(normalizedRoot);
+  }
+  return { version: 2, roots };
 }
 
 export function renderConfig(config: OverlordConfig): string {
-  const ordered: Record<string, unknown> = { version: 1, external: config.external };
+  const ordered: Record<string, unknown> = { version: 2, roots: config.roots };
   return stringify(ordered, { lineWidth: 0, indent: 2 });
-}
-
-export function isExternal(
-  config: OverlordConfig,
-  kind: "skill" | "agent",
-  name: string,
-  target: "claude" | "codex",
-): ExternalEntry | undefined {
-  return config.external.find((entry) =>
-    entry.kind === kind && entry.name === name && (entry.target === undefined || entry.target === target),
-  );
-}
-
-export function addExternal(config: OverlordConfig, entry: ExternalEntry): OverlordConfig {
-  if (config.external.some((candidate) =>
-    candidate.kind === entry.kind && candidate.name === entry.name && candidate.target === entry.target,
-  )) return config;
-  return { ...config, external: [...config.external, entry] };
 }

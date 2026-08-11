@@ -36,7 +36,7 @@ describe("agent adapters", () => {
       ---
 
       Review carefully.
-      A delimiter: ''' and a quote: \".
+      A delimiter: ''' and a quote: ".
       "
     `);
     expect(renderClaudeAgent(agent)).toBe(rendered);

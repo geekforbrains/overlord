@@ -1,5 +1,5 @@
-import { lstat, readFile, readdir, readlink, stat } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { lstat, readFile, readdir } from "node:fs/promises";
+import { basename, extname, join, relative } from "node:path";
 
 import { parseFrontmatter } from "./frontmatter.js";
 import type {
@@ -11,10 +11,6 @@ import type {
   TargetName,
   TargetOverlay,
 } from "./types.js";
-
-export interface LoadCanonicalOptions {
-  strict?: boolean;
-}
 
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const AGENT_NAME = /^[a-z]+(?:-[a-z]+)*$/;
@@ -140,10 +136,21 @@ async function inventorySkill(
 
     entries.sort((left, right) => compareText(left.name, right.name));
     for (const entry of entries) {
-      if (ignoredArtifact(entry.name)) continue;
-
       const absolutePath = join(directory, entry.name);
       const relativePath = relative(root, absolutePath);
+      if (entry.isSymbolicLink()) {
+        valid = false;
+        diagnostic(
+          diagnostics,
+          "error",
+          "unsupported-skill-symlink",
+          `Skill contains symlink '${relativePath}'; symlinks are not supported.`,
+          absolutePath,
+        );
+        continue;
+      }
+      if (ignoredArtifact(entry.name)) continue;
+
       if (entry.isDirectory()) {
         directories.push(relativePath);
         await walk(absolutePath);
@@ -158,41 +165,6 @@ async function inventorySkill(
             path: absolutePath,
             mode: metadata.mode & 0o777,
             contents: await readFile(absolutePath),
-          });
-        } else if (entry.isSymbolicLink()) {
-          const target = await readlink(absolutePath);
-          const resolvedTarget = resolve(dirname(absolutePath), target);
-          const relativeTarget = relative(root, resolvedTarget);
-          if (relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`)) {
-            valid = false;
-            diagnostic(
-              diagnostics,
-              "error",
-              "unsafe-symlink",
-              `Skill symlink '${relativePath}' escapes its skill directory.`,
-              absolutePath,
-            );
-          } else {
-            try {
-              await stat(absolutePath);
-            } catch (error) {
-              valid = false;
-              diagnostic(
-                diagnostics,
-                "error",
-                "dangling-symlink",
-                `Skill symlink '${relativePath}' cannot be resolved: ${error instanceof Error ? error.message : String(error)}`,
-                absolutePath,
-              );
-            }
-          }
-          files.push({
-            relativePath,
-            path: absolutePath,
-            mode: metadata.mode & 0o777,
-            contents: Buffer.from(target),
-            kind: "symlink",
-            linkTarget: target,
           });
         } else {
           valid = false;
@@ -391,7 +363,6 @@ function validateOverlay(
   target: TargetName,
   overlay: TargetOverlay,
   path: string,
-  strict: boolean,
   diagnostics: Diagnostic[],
 ): boolean {
   let valid = true;
@@ -410,10 +381,9 @@ function validateOverlay(
     }
     if (known.has(field)) continue;
 
-    if (strict) valid = false;
     diagnostic(
       diagnostics,
-      strict ? "error" : "warning",
+      "warning",
       "unknown-overlay-field",
       `Agent '${agentName}' has unknown field '${field}' for target ${target}; passing it through unchanged.`,
       path,
@@ -444,10 +414,20 @@ function targetOverlay(
 
 async function loadAgent(
   path: string,
-  strict: boolean,
   diagnostics: Diagnostic[],
 ): Promise<CanonicalAgent> {
-  const fileStem = basename(path, extname(path));
+  const extension = extname(path);
+  const fileStem = basename(path, extension);
+  const portableExtension = extension === ".md";
+  if (!portableExtension) {
+    diagnostic(
+      diagnostics,
+      "error",
+      "non-portable-agent-extension",
+      `Canonical agent '${basename(path)}' must use the lowercase '.md' extension.`,
+      path,
+    );
+  }
   try {
     if ((await lstat(path)).isSymbolicLink()) {
       diagnostic(
@@ -487,7 +467,7 @@ async function loadAgent(
   }
   let attributes: Record<string, unknown> = {};
   let body = "";
-  let valid = true;
+  let valid = portableExtension;
 
   try {
     ({ attributes, body } = parseFrontmatter(await readFile(path, "utf8"), path));
@@ -577,8 +557,8 @@ async function loadAgent(
   const codex = targetOverlay(targetValues.codex, "codex", path, diagnostics);
   if (targetValues.claude !== undefined && targetValues.claude !== false && !isRecord(targetValues.claude)) valid = false;
   if (targetValues.codex !== undefined && targetValues.codex !== false && !isRecord(targetValues.codex)) valid = false;
-  if (claude !== false && !validateOverlay(name, "claude", claude, path, strict, diagnostics)) valid = false;
-  if (codex !== false && !validateOverlay(name, "codex", codex, path, strict, diagnostics)) valid = false;
+  if (claude !== false && !validateOverlay(name, "claude", claude, path, diagnostics)) valid = false;
+  if (codex !== false && !validateOverlay(name, "codex", codex, path, diagnostics)) valid = false;
 
   return {
     version: 1,
@@ -595,7 +575,7 @@ async function childDirectories(path: string): Promise<string[]> {
   try {
     const entries = await readdir(path, { withFileTypes: true });
     return entries
-      .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !ignoredArtifact(entry.name))
+      .filter((entry) => !ignoredArtifact(entry.name))
       .map((entry) => join(path, entry.name))
       .sort(compareText);
   } catch (error) {
@@ -608,7 +588,7 @@ async function agentFiles(path: string): Promise<string[]> {
   try {
     const entries = await readdir(path, { withFileTypes: true });
     return entries
-      .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && extname(entry.name) === ".md" && !ignoredArtifact(entry.name))
+      .filter((entry) => extname(entry.name).toLowerCase() === ".md" && !ignoredArtifact(entry.name))
       .map((entry) => join(path, entry.name))
       .sort(compareText);
   } catch (error) {
@@ -617,20 +597,56 @@ async function agentFiles(path: string): Promise<string[]> {
   }
 }
 
+async function physicalCanonicalDirectory(
+  path: string,
+  label: string,
+  diagnostics: Diagnostic[],
+): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) return true;
+    diagnostic(
+      diagnostics,
+      "error",
+      "invalid-canonical-root",
+      `${label} must be a physical directory inside the scope.`,
+      path,
+    );
+    return false;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    diagnostic(
+      diagnostics,
+      "error",
+      "unreadable-canonical-root",
+      `Cannot inspect ${label}: ${error instanceof Error ? error.message : String(error)}`,
+      path,
+    );
+    return false;
+  }
+}
+
 /** Load and validate all canonical definitions in one `.agents` directory. */
 export async function loadCanonicalScope(
   canonicalRoot: string,
-  options: LoadCanonicalOptions = {},
 ): Promise<CanonicalScope> {
   const diagnostics: Diagnostic[] = [];
   const skills: CanonicalSkill[] = [];
   const agents: CanonicalAgent[] = [];
 
-  for (const directory of await childDirectories(join(canonicalRoot, "skills"))) {
-    skills.push(await loadSkill(directory, diagnostics));
+  if (!(await physicalCanonicalDirectory(canonicalRoot, "canonical root", diagnostics))) {
+    return { skills, agents, diagnostics };
   }
-  for (const path of await agentFiles(join(canonicalRoot, "overlord", "agents"))) {
-    agents.push(await loadAgent(path, options.strict ?? false, diagnostics));
+  const skillRoot = join(canonicalRoot, "skills");
+  if (await physicalCanonicalDirectory(skillRoot, "canonical skills root", diagnostics)) {
+    for (const directory of await childDirectories(skillRoot)) skills.push(await loadSkill(directory, diagnostics));
+  }
+  const overlordRoot = join(canonicalRoot, "overlord");
+  if (await physicalCanonicalDirectory(overlordRoot, "canonical Overlord root", diagnostics)) {
+    const agentRoot = join(overlordRoot, "agents");
+    if (await physicalCanonicalDirectory(agentRoot, "canonical agents root", diagnostics)) {
+      for (const path of await agentFiles(agentRoot)) agents.push(await loadAgent(path, diagnostics));
+    }
   }
 
   skills.sort((left, right) => compareText(left.name, right.name) || compareText(left.path, right.path));

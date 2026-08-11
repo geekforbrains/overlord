@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { cp, chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -26,39 +26,18 @@ export async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export async function isDanglingSymlink(path: string): Promise<boolean> {
-  try {
-    const info = await lstat(path);
-    if (!info.isSymbolicLink()) return false;
-    try {
-      await stat(path);
-      return false;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
-      throw error;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
-
-export async function symlinkResolvesTo(path: string, expected: string): Promise<boolean> {
-  try {
-    if (!(await lstat(path)).isSymbolicLink()) return false;
-    const target = await readlink(path);
-    return resolve(dirname(path), target) === resolve(expected);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
-}
-
 interface TreeEntry {
   relativePath: string;
-  kind: "directory" | "file" | "symlink";
+  kind: "directory" | "file";
   mode: number;
   contents: Buffer;
+}
+
+function unsupportedSkillSymlink(root: string, path: string): Error {
+  return Object.assign(new Error(`Skill contains symlink '${relative(root, path)}'; symlinks are not supported.`), {
+    code: "permission-denied",
+    path,
+  });
 }
 
 async function treeEntries(root: string, current = root): Promise<TreeEntry[]> {
@@ -66,31 +45,67 @@ async function treeEntries(root: string, current = root): Promise<TreeEntry[]> {
   const children = await readdir(current, { withFileTypes: true });
   children.sort((left, right) => left.name.localeCompare(right.name));
   for (const child of children) {
-    if (ignoredSkillArtifact(child.name)) continue;
     const path = join(current, child.name);
     const relativePath = relative(root, path).split(sep).join("/");
+    if (child.isSymbolicLink()) throw unsupportedSkillSymlink(root, path);
+    if (ignoredSkillArtifact(child.name)) continue;
     const info = await lstat(path);
     if (child.isDirectory()) {
       entries.push({ relativePath, kind: "directory", mode: info.mode & 0o777, contents: Buffer.alloc(0) });
       entries.push(...await treeEntries(root, path));
     } else if (child.isFile()) {
       entries.push({ relativePath, kind: "file", mode: info.mode & 0o777, contents: await readFile(path) });
-    } else if (child.isSymbolicLink()) {
-      const rawTarget = await readlink(path);
-      const resolvedTarget = resolve(dirname(path), rawTarget);
-      const relativeTarget = relative(root, resolvedTarget);
-      if (relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`)) {
-        throw Object.assign(new Error(`Symlink escapes skill directory: ${relativePath}`), { code: "permission-denied", path });
-      }
-      entries.push({ relativePath, kind: "symlink", mode: info.mode & 0o777, contents: Buffer.from(rawTarget) });
     }
   }
   return entries;
 }
 
-export async function assertNoSymlinkedParent(destination: string, boundary: string): Promise<void> {
+/**
+ * Require a physical parent chain below a native boundary. A boundary alias is
+ * accepted only when its current target matches a caller-pinned physical path.
+ */
+export async function assertNoSymlinkedParent(
+  destination: string,
+  boundary: string,
+  expectedPhysicalBoundary?: string,
+): Promise<void> {
   const absoluteDestination = resolve(destination);
   const absoluteBoundary = resolve(boundary);
+  let boundaryMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    boundaryMetadata = await lstat(absoluteBoundary);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const denyBoundary = (message: string): never => {
+    throw Object.assign(new Error(message), {
+      code: "permission-denied",
+      path: absoluteBoundary,
+    });
+  };
+  if (boundaryMetadata === undefined) {
+    if (expectedPhysicalBoundary !== undefined) {
+      denyBoundary(`Native boundary no longer resolves to its pinned directory: ${absoluteBoundary}`);
+    }
+  } else {
+    if (!boundaryMetadata.isDirectory() && !boundaryMetadata.isSymbolicLink()) {
+      denyBoundary(`Native boundary must be a directory: ${absoluteBoundary}`);
+    }
+    if (boundaryMetadata.isSymbolicLink() && expectedPhysicalBoundary === undefined) {
+      denyBoundary(`Native boundary must be a physical directory: ${absoluteBoundary}`);
+    }
+    if (expectedPhysicalBoundary !== undefined) {
+      const physicalBoundary = await realpath(absoluteBoundary).catch(() => (
+        denyBoundary(`Native boundary no longer resolves to its pinned directory: ${absoluteBoundary}`)
+      ));
+      if (physicalBoundary !== expectedPhysicalBoundary) {
+        denyBoundary(`Native boundary no longer resolves to its pinned directory: ${absoluteBoundary}`);
+      }
+      if (!(await lstat(physicalBoundary)).isDirectory()) {
+        denyBoundary(`Native boundary target must be a directory: ${absoluteBoundary}`);
+      }
+    }
+  }
   const parent = dirname(absoluteDestination);
   const fromBoundary = relative(absoluteBoundary, parent);
   if (fromBoundary === ".." || fromBoundary.startsWith(`..${sep}`)) {
@@ -136,74 +151,103 @@ export async function compareDirectories(left: string, right: string): Promise<{
 async function copyTree(source: string, destination: string): Promise<void> {
   await cp(source, destination, {
     recursive: true,
-    dereference: false,
-    verbatimSymlinks: true,
     preserveTimestamps: true,
     filter: (path) => !ignoredSkillArtifact(path),
   });
 }
 
-export async function writeFileAtomic(path: string, contents: string | Buffer, mode?: number): Promise<void> {
+/** Atomically publish a new file without replacing an existing path or filesystem alias. */
+export async function writeFileAtomicExclusive(path: string, contents: string | Buffer, mode?: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.overlord-${basename(path)}-${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, contents, mode === undefined ? undefined : { mode });
     if (mode !== undefined) await chmod(temporary, mode);
-    await rename(temporary, path);
+    await link(temporary, path);
   } finally {
     await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
 
-export async function copyDirectoryAtomic(source: string, destination: string): Promise<void> {
+/** Publish a validated skill tree without replacing any path that already exists. */
+export async function copyDirectoryExclusive(source: string, destination: string): Promise<void> {
+  if (await pathExists(destination)) {
+    throw Object.assign(new Error(`Destination already exists: ${destination}`), { code: "EEXIST", path: destination });
+  }
   const externalStage = await mkdtemp(join(tmpdir(), "overlord-stage-"));
   const stagedPayload = join(externalStage, "payload");
-  const siblingStage = join(dirname(destination), `.overlord-${basename(destination)}-${randomUUID()}.tmp`);
+  let claimedDestination = false;
   try {
+    await treeEntries(source);
     await copyTree(source, stagedPayload);
+    const entries = await treeEntries(stagedPayload);
+    const rootMode = (await lstat(stagedPayload)).mode & 0o777;
     await mkdir(dirname(destination), { recursive: true });
-    await copyTree(stagedPayload, siblingStage);
-    await rename(siblingStage, destination);
+    await mkdir(destination, { recursive: false, mode: 0o700 });
+    claimedDestination = true;
+    const directories = entries.filter((entry) => entry.kind === "directory");
+    for (const entry of directories) {
+      const path = join(destination, entry.relativePath);
+      await mkdir(path, { recursive: false, mode: 0o700 });
+    }
+    for (const entry of entries) {
+      const path = join(destination, entry.relativePath);
+      if (entry.kind === "file") await writeFileAtomicExclusive(path, entry.contents, entry.mode);
+    }
+    for (const entry of [...directories].reverse()) {
+      await chmod(join(destination, entry.relativePath), entry.mode);
+    }
+    await chmod(destination, rootMode);
+  } catch (error) {
+    if (claimedDestination && error !== null && typeof error === "object") {
+      const carrier = error as { createdPaths?: unknown };
+      const existing = Array.isArray(carrier.createdPaths) ? carrier.createdPaths : [];
+      carrier.createdPaths = [destination, ...existing];
+    }
+    throw error;
   } finally {
-    await rm(siblingStage, { recursive: true, force: true }).catch(() => undefined);
     await rm(externalStage, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
-export async function createBackup(path: string): Promise<string> {
-  const backupRoot = await mkdtemp(join(tmpdir(), "overlord-backup-"));
-  const destination = join(backupRoot, basename(path));
-  const info = await lstat(path);
-  if (info.isDirectory() && !info.isSymbolicLink()) await copyTree(path, destination);
-  else if (info.isSymbolicLink()) await symlinkClone(path, destination);
-  else await cp(path, destination, { preserveTimestamps: true });
-  return destination;
-}
-
-async function symlinkClone(source: string, destination: string): Promise<void> {
-  const target = await readlink(source);
-  const { symlink } = await import("node:fs/promises");
-  await symlink(target, destination);
-}
-
-export async function replaceDirectoryWithBackup(source: string, destination: string): Promise<string> {
-  const backup = await createBackup(destination);
-  const displaced = join(dirname(destination), `.overlord-${basename(destination)}-${randomUUID()}.old`);
+async function displaceToBackup(path: string, artifactRoot: string): Promise<string> {
+  const boundary = dirname(artifactRoot);
+  const backupContainer = join(boundary, ".overlord-backups");
+  const backupDirectory = join(backupContainer, randomUUID());
+  const backup = join(backupDirectory, basename(path));
+  await assertNoSymlinkedParent(backup, boundary);
   try {
-    await rename(destination, displaced);
-    await copyDirectoryAtomic(source, destination);
-    await rm(displaced, { recursive: true, force: true });
-    return backup;
+    await mkdir(backupContainer, { recursive: false, mode: 0o700 });
   } catch (error) {
-    if (!(await pathExists(destination)) && await pathExists(displaced)) await rename(displaced, destination).catch(() => undefined);
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
+  const containerMetadata = await lstat(backupContainer);
+  if (containerMetadata.isSymbolicLink() || !containerMetadata.isDirectory()) {
+    throw Object.assign(new Error(`Backup root must be a physical directory: ${backupContainer}`), {
+      code: "permission-denied",
+      path: backupContainer,
+    });
+  }
+  await mkdir(backupDirectory, { recursive: false, mode: 0o700 });
+  await assertNoSymlinkedParent(backup, boundary);
+  await rename(path, backup);
+  return backup;
 }
 
-export async function removeWithBackup(path: string): Promise<string> {
-  const backup = await createBackup(path);
+/** Atomically move an artifact out of its inventory root into a recoverable backup. */
+export async function removeWithBackup(path: string, artifactRoot: string): Promise<string> {
+  return displaceToBackup(path, artifactRoot);
+}
+
+/** Atomically displace a file, then exclusively publish its replacement. */
+export async function replaceFileWithBackup(
+  path: string,
+  contents: string | Buffer,
+  artifactRoot: string,
+): Promise<string> {
+  const backup = await displaceToBackup(path, artifactRoot);
   try {
-    await rm(path, { recursive: true, force: false });
+    await writeFileAtomicExclusive(path, contents);
   } catch (error) {
     if (error !== null && typeof error === "object") {
       Object.assign(error, { createdBackups: [backup] });

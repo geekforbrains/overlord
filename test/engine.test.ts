@@ -2,28 +2,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { lstat, mkdir, readFile, readlink, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+
+import { initialize, inspect, synchronize } from "../src/engine.js";
+import { acquireScopeLock } from "../src/filesystem.js";
 import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
-import { inspect, initialize, synchronize } from "../src/engine.js";
-import { lockPathForScope } from "../src/filesystem.js";
 import type { EngineOptions } from "../src/types.js";
 
 afterEach(cleanupTemporaryDirectories);
 
-async function fixture(availability: EngineOptions["availability"] = { claude: { available: true, version: "test" }, codex: { available: true, version: "test" } }) {
-  const home = await temporaryDirectory();
-  const project = join(home, "project");
-  await mkdir(project);
-  const options: EngineOptions = {
-    cwd: project,
-    home,
-    env: {
-      CLAUDE_CONFIG_DIR: join(home, "claude-home"),
-      CODEX_HOME: join(home, "codex-home"),
-    },
-    project,
-    availability,
-  };
-  return { home, project, options };
+function namedSkill(name: string, body = "Run the documented build and report concrete failures."): string {
+  return validSkill.replaceAll("verify-build", name).replace(
+    "Run the documented build and report concrete failures.",
+    body,
+  );
 }
 
 function codexOnlyAgent(name: string): string {
@@ -40,64 +31,127 @@ Review carefully.
 `;
 }
 
-describe("inventory and synchronization", () => {
-  it("initializes canonical directories and configuration without overwriting", async () => {
-    const { project, options } = await fixture();
-    const first = await initialize(options, { dryRun: false });
+async function fixture() {
+  const home = await temporaryDirectory();
+  const discoveryRoot = await temporaryDirectory();
+  const options: EngineOptions = {
+    home,
+    env: {
+      CLAUDE_CONFIG_DIR: join(home, ".claude"),
+      CODEX_HOME: join(home, ".codex"),
+    },
+  };
+  await writeText(
+    join(home, ".agents/overlord/overlord.yaml"),
+    `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+  );
+  return { home, discoveryRoot, options };
+}
+
+describe("fleet inventory and synchronization", () => {
+  it("initializes the user source and bundled skill idempotently", async () => {
+    const home = await temporaryDirectory();
+    const options: EngineOptions = { home, env: {} };
+
+    const first = await initialize(options);
+
     expect(first.status).toBe("ok");
-    expect(await readFile(join(project, ".agents/overlord/overlord.yaml"), "utf8")).toBe("version: 1\nexternal: []\n");
-    const second = await initialize(options, { dryRun: false });
-    expect(second.actions?.every((action) => action.writes?.length === 0)).toBe(true);
+    expect(await readFile(join(home, ".agents/overlord/overlord.yaml"), "utf8")).toBe("version: 2\nroots: []\n");
+    expect(await readFile(join(home, ".agents/skills/overlord/SKILL.md"), "utf8")).toContain("name: overlord");
+
+    const second = await initialize(options);
+    expect(second.status).toBe("ok");
+    expect(second.actions).toEqual([]);
   });
 
-  it("installs the bundled skill only for global initialization", async () => {
-    const { home, options } = await fixture();
-    const globalOptions = { ...options, project: undefined, global: true } satisfies EngineOptions;
-    await initialize(globalOptions, { dryRun: false });
-    expect(await readFile(join(home, ".agents/skills/overlord/SKILL.md"), "utf8")).toContain("overlord status --json");
+  it("reports only init work completed before a later failure", async () => {
+    const home = await temporaryDirectory();
+    const options: EngineOptions = { home, env: {} };
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/agents"), "blocks the agents directory\n");
+
+    let failure: unknown;
+    try {
+      await initialize(options);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as { completedActions?: unknown }).completedActions).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        writes: [join(home, ".agents/skills")],
+      }),
+    ]);
   });
 
-  it("reports canonical skills missing only from Claude because Codex reads them directly", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    const result = await inspect(options);
-    const definition = result.definitions?.find((entry) => entry.name === "verify-build");
-    expect(definition).toMatchObject({ kind: "skill", state: "missing" });
-    expect(definition?.outputs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ target: "codex", state: "synced", readsCanonicalDirectly: true }),
-      expect.objectContaining({ target: "claude", state: "missing" }),
+  it("reports init work completed before bundled-skill verification fails", async () => {
+    const home = await temporaryDirectory();
+    const options: EngineOptions = { home, env: {} };
+    await mkdir(join(home, ".agents/skills/overlord/SKILL.md"), { recursive: true });
+
+    let failure: unknown;
+    try {
+      await initialize(options);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    const actions = (failure as { completedActions?: Array<{ writes?: string[] }> }).completedActions ?? [];
+    expect(actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ writes: [join(home, ".agents/overlord/agents")] }),
+      expect.objectContaining({ writes: [join(home, ".agents/overlord/overlord.yaml")] }),
     ]));
   });
 
-  it("copies missing skills byte-for-byte, preserves modes, and becomes idempotent", async () => {
-    const { project, options } = await fixture();
+  it("copies canonical skills byte-for-byte, preserves modes, and becomes idempotent", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "app");
     const source = join(project, ".agents/skills/verify-build");
+    const destination = join(project, ".claude/skills/verify-build");
     await writeText(join(source, "SKILL.md"), validSkill);
     await writeText(join(source, "scripts/check.sh"), "#!/bin/sh\nexit 0\n", 0o751);
-    const first = await synchronize(options, { dryRun: false, resolutions: {} });
+
+    const first = await synchronize(options);
+
     expect(first.status).toBe("ok");
-    const destination = join(project, ".claude/skills/verify-build");
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe(validSkill);
     expect((await lstat(join(destination, "scripts/check.sh"))).mode & 0o777).toBe(0o751);
     const before = (await lstat(join(destination, "SKILL.md"))).mtimeMs;
-    const second = await synchronize(options, { dryRun: false, resolutions: {} });
-    expect(second.actions?.flatMap((action) => action.writes ?? [])).toEqual([]);
+
+    const second = await synchronize(options);
+    expect(second.actions).toEqual([]);
     expect((await lstat(join(destination, "SKILL.md"))).mtimeMs).toBe(before);
   });
 
   it("renders one canonical agent to both native formats", async () => {
-    const { project, options } = await fixture();
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "app");
     await writeText(join(project, ".agents/overlord/agents/reviewer.md"), validAgent);
-    await synchronize(options, { dryRun: false, resolutions: {} });
+
+    const result = await synchronize(options);
+
     const claude = await readFile(join(project, ".claude/agents/reviewer.md"), "utf8");
     const codex = parseToml(await readFile(join(project, ".codex/agents/reviewer.toml"), "utf8"));
+    expect(result.status).toBe("ok");
     expect(claude).toContain("color: cyan");
-    expect(codex).toMatchObject({ name: "reviewer", sandbox_mode: "read-only", developer_instructions: expect.stringContaining("Review the requested change") });
-    expect((await inspect(options)).definitions?.find((entry) => entry.name === "reviewer")?.state).toBe("synced");
+    expect(codex).toMatchObject({
+      name: "reviewer",
+      sandbox_mode: "read-only",
+      developer_instructions: expect.stringContaining("Review the requested change"),
+    });
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      name: "reviewer",
+      scopePath: project,
+      state: "synced",
+    }));
   });
 
-  it("does not report outputs for a disabled target", async () => {
-    const { project, options } = await fixture();
+  it("does not create or report an output for a disabled agent target", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "app");
     await writeText(
       join(project, ".agents/overlord/agents/reviewer.md"),
       validAgent.replace(
@@ -105,13 +159,20 @@ describe("inventory and synchronization", () => {
         "  claude: false\n",
       ),
     );
-    const result = await inspect(options);
-    const outputs = result.definitions?.find((entry) => entry.name === "reviewer")?.outputs;
-    expect(outputs?.map((output) => output.target)).toEqual(["codex"]);
+
+    const result = await synchronize(options);
+    const definition = result.definitions?.find((entry) => entry.scopePath === project && entry.name === "reviewer");
+
+    expect(result.status).toBe("ok");
+    expect(definition?.outputs.map((output) => output.target)).toEqual(["codex"]);
+    await expect(lstat(join(project, ".claude/agents/reviewer.md"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(project, ".codex/agents/reviewer.toml"), "utf8")).toContain('name = "reviewer"');
   });
 
-  it("blocks all sync writes when a canonical target overlay is invalid", async () => {
-    const { project, options } = await fixture();
+  it("blocks every write in a scope containing an invalid canonical definition", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "broken");
+    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
     await writeText(
       join(project, ".agents/overlord/agents/reviewer.md"),
       validAgent.replace(
@@ -120,209 +181,270 @@ describe("inventory and synchronization", () => {
       ),
     );
 
-    const inspected = await inspect(options);
-    expect(inspected.definitions?.find((entry) => entry.name === "reviewer")?.state).toBe("invalid");
+    const result = await synchronize(options);
 
-    const result = await synchronize(options, { dryRun: false, resolutions: {} });
     expect(result.status).toBe("attention-required");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "reviewer",
+      state: "invalid",
+    }));
+    await expect(lstat(join(project, ".claude/skills/verify-build"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(lstat(join(project, ".claude/agents/reviewer.md"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(lstat(join(project, ".codex/agents/reviewer.toml"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("diagnoses a directory occupying a native agent file before dry-run mutation planning", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".agents/overlord/agents/reviewer.md"), codexOnlyAgent("reviewer"));
-    const occupied = join(project, ".codex/agents/reviewer.toml");
-    await mkdir(occupied, { recursive: true });
-
-    const result = await synchronize(options, { dryRun: true, resolutions: {} });
-    const definition = result.definitions?.find((entry) => entry.name === "reviewer");
-
-    expect(definition?.state).toBe("invalid");
-    expect(definition?.outputs).toContainEqual(expect.objectContaining({
-      target: "codex",
-      path: occupied,
-      state: "invalid",
-    }));
-    expect(definition?.evidence).toMatch(/directory|expected.*file/i);
-    expect(result.actions?.flatMap((action) => action.writes ?? [])).not.toContain(occupied);
-    expect((await lstat(occupied)).isDirectory()).toBe(true);
-  });
-
-  it("preflights every native agent destination before writing an earlier missing output", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".agents/overlord/agents/alpha.md"), codexOnlyAgent("alpha"));
-    await writeText(join(project, ".agents/overlord/agents/beta.md"), codexOnlyAgent("beta"));
+  it("preflights every destination before writing an earlier missing output", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "blocked-destination");
     const alphaOutput = join(project, ".codex/agents/alpha.toml");
     const occupied = join(project, ".codex/agents/beta.toml");
+    await writeText(join(project, ".agents/overlord/agents/alpha.md"), codexOnlyAgent("alpha"));
+    await writeText(join(project, ".agents/overlord/agents/beta.md"), codexOnlyAgent("beta"));
     await mkdir(occupied, { recursive: true });
 
-    const result = await synchronize(options, { dryRun: false, resolutions: {} });
+    const result = await synchronize(options);
 
     expect(result.status).toBe("attention-required");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "beta",
+      state: "invalid",
+    }));
     await expect(lstat(alphaOutput)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await lstat(occupied)).isDirectory()).toBe(true);
-    expect(result.definitions?.find((entry) => entry.name === "beta")?.state).toBe("invalid");
   });
 
-  it("warns and omits missing states for an unavailable target", async () => {
-    const { project, options } = await fixture({ claude: { available: false, version: null }, codex: { available: true, version: "test" } });
-    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    const result = await inspect(options);
-    expect(result.targets).toContainEqual(expect.objectContaining({ name: "claude", available: false }));
-    expect(result.definitions?.find((entry) => entry.name === "verify-build")?.state).toBe("synced");
-    expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "target-unavailable", severity: "warning" }));
+  it("reports conflicts without overwriting canonical or native content", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "conflict");
+    const canonicalPath = join(project, ".agents/skills/verify-build/SKILL.md");
+    const nativePath = join(project, ".claude/skills/verify-build/SKILL.md");
+    const nativeSkill = validSkill.replace("Run the documented build", "Run a different build");
+    await writeText(canonicalPath, validSkill);
+    await writeText(nativePath, nativeSkill);
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("attention-required");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "verify-build",
+      state: "conflict",
+    }));
+    expect(await readFile(canonicalPath, "utf8")).toBe(validSkill);
+    expect(await readFile(nativePath, "utf8")).toBe(nativeSkill);
   });
 
-  it("reports and preserves conflicts until explicitly resolved", async () => {
-    const { project, options } = await fixture();
+  it("automatically adopts a unique Claude skill", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "claude-native");
+    const native = join(project, ".claude/skills/verify-build/SKILL.md");
     const canonical = join(project, ".agents/skills/verify-build/SKILL.md");
-    const native = join(project, ".claude/skills/verify-build/SKILL.md");
-    await writeText(canonical, validSkill);
-    await writeText(native, validSkill.replace("Run the documented build", "Run a different build"));
-    const pending = await synchronize(options, { dryRun: false, resolutions: {} });
-    const definition = pending.definitions?.find((entry) => entry.name === "verify-build");
-    expect(pending.status).toBe("attention-required");
-    expect(definition).toMatchObject({ state: "conflict", decision: { options: ["agents", "claude", "skip"] } });
-    expect(await readFile(native, "utf8")).toContain("different build");
-
-    await synchronize(options, { dryRun: false, resolutions: { "skill:verify-build@project": "agents" } });
-    expect(await readFile(native, "utf8")).toBe(validSkill);
-  });
-
-  it("adopts a Claude skill and materializes the same canonical bytes", async () => {
-    const { project, options } = await fixture();
-    const native = join(project, ".claude/skills/verify-build/SKILL.md");
     await writeText(native, validSkill);
-    const pending = await inspect(options);
-    expect(pending.definitions?.[0]).toMatchObject({ state: "unadopted", decision: { options: ["adopt", "external", "delete", "skip"] } });
-    await synchronize(options, { dryRun: false, resolutions: { "skill:verify-build@project": "adopt" } });
-    expect(await readFile(join(project, ".agents/skills/verify-build/SKILL.md"), "utf8")).toBe(validSkill);
-    expect((await inspect(options)).summary?.adoptionComplete).toBe(true);
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("ok");
+    expect(await readFile(canonical, "utf8")).toBe(validSkill);
+    expect(await readFile(native, "utf8")).toBe(validSkill);
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "verify-build",
+      state: "synced",
+    }));
   });
 
-  it("moves an adopted scan-only Codex skill and retains a recoverable backup", async () => {
-    const { project, options } = await fixture();
+  it("migrates a unique Codex scan-only skill and retains a recoverable backup", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "codex-native");
     const native = join(project, ".codex/skills/verify-build");
+    const canonical = join(project, ".agents/skills/verify-build");
+    const claude = join(project, ".claude/skills/verify-build");
     await writeText(join(native, "SKILL.md"), validSkill);
-    const result = await synchronize(options, { dryRun: false, resolutions: { "skill:verify-build@project": "adopt" } });
-    expect(await readFile(join(project, ".agents/skills/verify-build/SKILL.md"), "utf8")).toBe(validSkill);
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("ok");
+    expect(await readFile(join(canonical, "SKILL.md"), "utf8")).toBe(validSkill);
+    expect(await readFile(join(claude, "SKILL.md"), "utf8")).toBe(validSkill);
     await expect(lstat(native)).rejects.toMatchObject({ code: "ENOENT" });
     const backup = result.actions?.flatMap((action) => action.backups ?? [])[0];
     expect(backup).toBeTruthy();
     expect(await readFile(join(backup!, "SKILL.md"), "utf8")).toBe(validSkill);
   });
 
-  it("adopts native agents without translating target-only fields", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".claude/agents/reviewer.md"), `---\nname: reviewer\ndescription: Reviews changes.\nmodel: opus\ncolor: blue\n---\n\nReview carefully.\n`);
-    await synchronize(options, { dryRun: false, resolutions: { "agent:reviewer@project": "adopt" } });
+  it("automatically adopts a native agent while preserving its provider overlay", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "native-agent");
+    const native = `---
+name: reviewer
+description: Reviews changes.
+model: opus
+color: blue
+---
+
+Review carefully.
+`;
+    await writeText(join(project, ".claude/agents/reviewer.md"), native);
+
+    const result = await synchronize(options);
+
     const canonical = await readFile(join(project, ".agents/overlord/agents/reviewer.md"), "utf8");
+    expect(result.status).toBe("ok");
     expect(canonical).toContain("model: opus");
     expect(canonical).toContain("color: blue");
     expect(canonical).toContain("codex: {}");
+    expect(await readFile(join(project, ".codex/agents/reviewer.toml"), "utf8")).toContain('name = "reviewer"');
   });
 
-  it("reports every provider output planned by a dry-run agent adoption", async () => {
-    const { project, options } = await fixture();
-    const claude = join(project, ".claude/agents/reviewer.md");
-    const canonical = join(project, ".agents/overlord/agents/reviewer.md");
-    const codex = join(project, ".codex/agents/reviewer.toml");
-    const native = `---\nname: reviewer\ndescription: Reviews changes.\nmodel: opus\n---\n\nReview carefully.\n`;
-    await writeText(claude, native);
+  it("deduplicates identical Claude and Codex native skills through canonical source", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "dual-native");
+    const claude = join(project, ".claude/skills/verify-build");
+    const codex = join(project, ".codex/skills/verify-build");
+    await writeText(join(claude, "SKILL.md"), validSkill);
+    await writeText(join(codex, "SKILL.md"), validSkill);
 
-    const result = await synchronize(options, {
-      dryRun: true,
-      resolutions: { "agent:reviewer@project": "adopt" },
-    });
+    const result = await synchronize(options);
 
-    expect(result.actions).toContainEqual(expect.objectContaining({
-      id: "plan-adopt-agent-reviewer",
-      writes: [canonical, claude, codex],
-    }));
-    expect(await readFile(claude, "utf8")).toBe(native);
-    await expect(lstat(canonical)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result.status).toBe("ok");
+    expect(await readFile(join(project, ".agents/skills/verify-build/SKILL.md"), "utf8")).toBe(validSkill);
+    expect(await readFile(join(claude, "SKILL.md"), "utf8")).toBe(validSkill);
     await expect(lstat(codex)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result.actions?.some((action) => action.removes?.includes(codex) && (action.backups?.length ?? 0) > 0)).toBe(true);
   });
 
-  it("marks unadopted files external in configuration without changing them", async () => {
-    const { project, options } = await fixture();
-    const native = join(project, ".claude/agents/reviewer.md");
-    const contents = `---\nname: reviewer\ndescription: Reviews.\n---\n\nReview.\n`;
-    await writeText(native, contents);
-    await synchronize(options, { dryRun: false, resolutions: { "agent:reviewer@project": "external" } });
-    expect(await readFile(native, "utf8")).toBe(contents);
-    expect(await readFile(join(project, ".agents/overlord/overlord.yaml"), "utf8")).toContain("target: claude");
-    expect((await inspect(options)).definitions?.[0]?.state).toBe("external");
-  });
-
-  it("deletes only with an explicit resolution and retains a backup", async () => {
-    const { project, options } = await fixture();
-    const native = join(project, ".claude/agents/reviewer.md");
-    await writeText(native, `---\nname: reviewer\ndescription: Reviews.\n---\n\nReview.\n`);
-    await synchronize(options, { dryRun: false, resolutions: {} });
-    expect(await lstat(native)).toBeTruthy();
-    const deleted = await synchronize(options, { dryRun: false, resolutions: { "agent:reviewer@project": "delete" }, confirmDestructive: true });
-    await expect(lstat(native)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(deleted.actions?.some((action) => (action.backups?.length ?? 0) > 0)).toBe(true);
-  });
-
-  it("never mutates on a dry run", async () => {
-    const { project, options } = await fixture();
+  it("removes an identical Codex scan-only duplicate and ignores .system skills", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "scan-only-duplicate");
+    const duplicate = join(project, ".codex/skills/verify-build");
     await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    const result = await synchronize(options, { dryRun: true, resolutions: {} });
-    expect(result.dryRun).toBe(true);
-    expect(result.actions?.some((action) => (action.writes?.length ?? 0) > 0)).toBe(true);
-    await expect(lstat(join(project, ".claude/skills/verify-build"))).rejects.toMatchObject({ code: "ENOENT" });
+    await writeText(join(duplicate, "SKILL.md"), validSkill);
+    const systemDirectory = process.platform === "darwin" ? ".SYSTEM" : ".system";
+    await writeText(
+      join(project, `.codex/skills/${systemDirectory}/internal/SKILL.md`),
+      namedSkill("internal"),
+    );
+
+    const preview = await inspect(options);
+    const result = await synchronize(options);
+
+    expect(preview.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "planned", writes: [join(project, ".claude/skills/verify-build")] }),
+      expect.objectContaining({ status: "planned", removes: [duplicate] }),
+    ]));
+    expect(result.status).toBe("ok");
+    await expect(lstat(duplicate)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(result.definitions?.some((definition) => definition.name === "internal")).toBe(false);
+    expect(result.actions?.some((action) => action.removes?.includes(duplicate) && (action.backups?.length ?? 0) > 0)).toBe(true);
   });
 
-  it("reports scan-only duplicates and skips .system", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(join(project, ".codex/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(join(project, ".codex/skills/.system/internal/SKILL.md"), validSkill.replaceAll("verify-build", "internal"));
-    const result = await inspect(options);
-    expect(result.definitions?.find((entry) => entry.name === "verify-build")?.state).toBe("conflict");
-    expect(result.definitions?.some((entry) => entry.name === "internal")).toBe(false);
+  it("does not hide a Claude skill named .system", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "claude-system-skill");
+    await writeText(
+      join(project, ".claude/skills/.system/SKILL.md"),
+      namedSkill("internal"),
+    );
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("attention-required");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: ".system",
+      state: "invalid",
+    }));
   });
 
-  it("treats a symlink to canonical as synced and a dangling symlink as invalid", async () => {
-    const { project, options } = await fixture();
+  it("reports a native agent with a case-aliased extension", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "native-extension");
+    await writeText(
+      join(project, ".claude/agents/reviewer.MD"),
+      `---\nname: reviewer\ndescription: Reviews changes.\n---\n\nReview carefully.\n`,
+    );
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("attention-required");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      kind: "agent",
+      name: "reviewer",
+      scopePath: project,
+      state: "invalid",
+    }));
+    await expect(lstat(join(project, ".agents/overlord/agents/reviewer.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects and preserves native skill symlinks, including links to canonical source", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "symlinks");
     const canonical = join(project, ".agents/skills/verify-build");
     const native = join(project, ".claude/skills/verify-build");
     await writeText(join(canonical, "SKILL.md"), validSkill);
     await mkdir(join(native, ".."), { recursive: true });
     await symlink(canonical, native);
-    expect((await inspect(options)).definitions?.find((entry) => entry.name === "verify-build")?.state).toBe("synced");
+
+    const linked = await synchronize(options);
+
+    expect(linked.status).toBe("attention-required");
     expect(await readlink(native)).toBe(canonical);
+    expect(linked.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "verify-build",
+      state: "invalid",
+    }));
 
     const dangling = join(project, ".claude/skills/dangling");
     await symlink(join(project, "missing"), dangling);
-    const result = await inspect(options);
-    expect(result.definitions?.find((entry) => entry.name === "dangling")?.state).toBe("invalid");
+    const invalid = await synchronize(options);
+    expect(invalid.status).toBe("attention-required");
+    expect(invalid.definitions).toContainEqual(expect.objectContaining({
+      scopePath: project,
+      name: "dangling",
+      state: "invalid",
+    }));
+    expect(await readlink(dangling)).toBe(join(project, "missing"));
   });
 
-  it("reports cross-scope collisions without offering a resolution", async () => {
-    const { home, project, options } = await fixture();
-    await writeText(join(home, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill.replace("documented build", "project build"));
-    const result = await inspect(options);
-    const collisions = result.definitions?.filter((entry) => entry.name === "verify-build" && entry.state === "conflict");
-    expect(collisions).toHaveLength(2);
-    expect(collisions?.every((entry) => entry.decision === undefined)).toBe(true);
+  it("reports one locked scope while continuing to synchronize a healthy sibling", async () => {
+    const { discoveryRoot, options } = await fixture();
+    const locked = join(discoveryRoot, "alpha-locked");
+    const healthy = join(discoveryRoot, "zulu-healthy");
+    await writeText(join(locked, ".agents/skills/locked-skill/SKILL.md"), namedSkill("locked-skill"));
+    await writeText(join(healthy, ".agents/skills/healthy-skill/SKILL.md"), namedSkill("healthy-skill"));
+    const release = await acquireScopeLock(locked);
+
+    let result;
+    try {
+      result = await synchronize(options);
+    } finally {
+      await release();
+    }
+
+    expect(result.status).toBe("attention-required");
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "lock-held",
+      severity: "error",
+      scopePath: locked,
+    }));
+    await expect(lstat(join(locked, ".claude/skills/locked-skill"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(healthy, ".claude/skills/healthy-skill/SKILL.md"), "utf8")).toContain("name: healthy-skill");
   });
 
-  it("reports legacy Claude commands as diagnostics without failing check state", async () => {
-    const { project, options } = await fixture();
-    await writeText(join(project, ".claude/commands/deploy.md"), "Deploy safely.\n");
-    const result = await inspect(options);
-    expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "unmanaged-claude-command", severity: "warning" }));
-    expect(result.summary?.total).toBe(0);
-  });
+  it("treats same-named user and project definitions as independent scopes", async () => {
+    const { home, discoveryRoot, options } = await fixture();
+    const project = join(discoveryRoot, "app");
+    await writeText(join(home, ".agents/skills/shared/SKILL.md"), namedSkill("shared", "Use the user workflow."));
+    await writeText(join(project, ".agents/skills/shared/SKILL.md"), namedSkill("shared", "Use the project workflow."));
 
-  it("detects an already-held mutation lock", async () => {
-    const { project, options } = await fixture();
-    await mkdir(lockPathForScope(project), { recursive: true });
-    await expect(synchronize(options, { dryRun: false, resolutions: {} })).rejects.toMatchObject({ code: "lock-held" });
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("ok");
+    expect(result.definitions?.filter((definition) => definition.name === "shared")).toHaveLength(2);
+    expect(await readFile(join(home, ".claude/skills/shared/SKILL.md"), "utf8")).toContain("Use the user workflow.");
+    expect(await readFile(join(project, ".claude/skills/shared/SKILL.md"), "utf8")).toContain("Use the project workflow.");
   });
 });

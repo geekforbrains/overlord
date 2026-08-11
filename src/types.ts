@@ -1,58 +1,41 @@
-/** The two native clients supported by the version 0.1 adapter contract. */
+/** Native clients supported by Overlord. */
 export type TargetName = "claude" | "codex";
 
 export type ArtifactKind = "skill" | "agent";
 export type ScopeType = "user" | "project";
-export type DefinitionState =
-  | "synced"
-  | "missing"
-  | "unadopted"
-  | "conflict"
-  | "external"
-  | "invalid";
+export type DefinitionState = "synced" | "missing" | "unadopted" | "conflict" | "invalid";
 export type Severity = "info" | "warning" | "error";
-export type ResolutionSide =
-  | "agents"
-  | "claude"
-  | "codex"
-  | "adopt"
-  | "external"
-  | "delete"
-  | "skip";
 
-export interface TargetAvailability {
-  available: boolean;
-  version: string | null;
-}
-
-export interface Availability {
-  claude: TargetAvailability;
-  codex: TargetAvailability;
-}
-
-export interface Scope {
-  type: ScopeType;
-  /** Absolute root of the selected user or project scope. */
+interface ScopeBase {
+  /** Absolute root of this independent scope. */
   path: string;
-  /** Absolute path to the scope's canonical `.agents` directory. */
+  /** Absolute canonical `.agents` directory for this scope. */
   canonical: string;
-  resolvedBy: "explicit-flag" | "nearest-ancestor" | "git-worktree-root" | "user-default";
-  evidence: string;
 }
+
+export interface UserScope extends ScopeBase {
+  type: "user";
+  discoveryRoot?: never;
+}
+
+export interface ProjectScope extends ScopeBase {
+  type: "project";
+  /** Configured parent boundary that discovered a project scope. */
+  discoveryRoot: string;
+}
+
+export type Scope = UserScope | ProjectScope;
 
 export interface Diagnostic {
   severity: Severity;
   message: string;
   code?: string;
   path?: string;
+  scopePath?: string;
   suggestion?: string;
 }
 
-/**
- * Overlay values intentionally remain open-ended. Both providers add native
- * settings independently, and the synchronizer must preserve fields it does
- * not yet recognise.
- */
+/** Provider-specific fields are preserved without translation. */
 export type TargetOverlay = Record<string, unknown>;
 
 export interface SkillFile {
@@ -60,8 +43,6 @@ export interface SkillFile {
   path: string;
   mode: number;
   contents: Buffer;
-  kind?: "file" | "symlink";
-  linkTarget?: string;
 }
 
 export interface CanonicalSkill {
@@ -72,7 +53,6 @@ export interface CanonicalSkill {
   skillFile: string;
   attributes: Record<string, unknown>;
   files: SkillFile[];
-  /** Relative directory paths, including empty directories, in lexical order. */
   directories: string[];
   valid: boolean;
 }
@@ -103,33 +83,24 @@ export interface DefinitionOutput {
   readsCanonicalDirectly?: boolean;
 }
 
-export interface DecisionRecord {
-  selector: string;
-  options: ResolutionSide[];
-}
-
 export interface DefinitionRecord {
   kind: ArtifactKind;
   name: string;
   scope: ScopeType;
+  scopePath: string;
   state: DefinitionState;
-  project?: string;
-  canonical?: string | null;
-  outputs?: DefinitionOutput[];
+  canonical: string | null;
+  outputs: DefinitionOutput[];
   evidence?: string;
   conflictsWith?: string[];
-  decision?: DecisionRecord;
-  externalReason?: string;
 }
 
 export interface ActionRecord {
   id: string;
+  status: "planned" | "completed";
   description: string;
-  argv: string[];
-  mutates: boolean;
-  requiresConfirmation?: boolean;
-  requiresDecision?: boolean;
-  scope?: ScopeType;
+  scope: ScopeType;
+  scopePath: string;
   reads?: string[];
   writes?: string[];
   removes?: string[];
@@ -137,48 +108,30 @@ export interface ActionRecord {
   backups?: string[];
 }
 
-export interface TargetRecord extends TargetAvailability {
-  name: TargetName;
-  paths?: Record<string, string>;
-  observability?: string[];
-}
-
 export interface SummaryRecord {
-  total?: number;
-  byState?: Partial<Record<DefinitionState, number>>;
-  managed?: number;
-  adoptionComplete?: boolean;
+  total: number;
+  byState: Partial<Record<DefinitionState, number>>;
+  managed: number;
 }
 
 export interface TimingRecord {
   totalMs?: number;
-  scanMs?: number;
-  compareMs?: number;
-  renderMs?: number;
 }
 
 export interface OutputError {
-  code:
-    | "usage"
-    | "config-invalid"
-    | "scope-unresolvable"
-    | "lock-held"
-    | "permission-denied"
-    | "internal";
+  code: "usage" | "config-invalid" | "lock-held" | "permission-denied" | "internal";
   message: string;
   path?: string;
   detail?: string;
 }
 
 export interface OutputDocument {
-  schemaVersion: 1;
+  schemaVersion: 2;
   command: "init" | "status" | "check" | "sync";
   status: "ok" | "attention-required" | "error";
   overlordVersion?: string;
-  dryRun?: boolean;
   error?: OutputError;
-  scope?: Scope;
-  targets?: TargetRecord[];
+  scopes?: Scope[];
   definitions?: DefinitionRecord[];
   summary?: SummaryRecord;
   actions?: ActionRecord[];
@@ -187,27 +140,11 @@ export interface OutputDocument {
 }
 
 export interface EngineOptions {
-  cwd: string;
   home: string;
   env: Readonly<Record<string, string | undefined>>;
-  global?: boolean;
-  project?: string | undefined;
-  strict?: boolean;
-  availability?: Availability;
-}
-
-export interface InitializeOptions {
-  dryRun: boolean;
-}
-
-export interface SyncOptions {
-  dryRun: boolean;
-  resolutions: Readonly<Record<string, ResolutionSide>>;
-  confirmDestructive?: boolean;
 }
 
 export interface CliIo {
   stdout(chunk: string): void;
   stderr(chunk: string): void;
-  isTTY: boolean;
 }
