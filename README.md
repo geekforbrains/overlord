@@ -198,4 +198,4 @@ The full check runs linting, typechecking, the test suite, and the production bu
 - [Claude Code: Custom subagents](https://code.claude.com/docs/en/sub-agents)
 - [Agent Skills specification](https://agentskills.io/specification)
 
-See the [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract.
+See the [changelog](CHANGELOG.md), [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract.

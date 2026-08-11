@@ -24,6 +24,7 @@
     "overlord": "./dist/cli.js"
   },
   "files": [
+    "CHANGELOG.md",
     "dist",
     "assets",
     "docs/spec.md",
