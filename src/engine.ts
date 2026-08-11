@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { configPath, loadConfig, renderConfig } from "./config.js";
 import { loadCanonicalScope } from "./definitions.js";
 import { discoverScopes, type DiscoveryResult } from "./discovery.js";
+import { commitManagedChanges, ensureUserRepository, requireUserRepository, type ManagedCommit } from "./git.js";
 import {
   acquireScopeLock,
   assertNoSymlinkedParent,
@@ -20,6 +21,7 @@ import {
   deleteLedgerEntry,
   digestFile,
   digestSkillTree,
+  ledgerPath,
   loadScopeLedger,
   saveScopeLedger,
   setLedgerEntry,
@@ -226,13 +228,22 @@ function summarize(definitions: readonly DefinitionRecord[]): SummaryRecord {
   };
 }
 
-function reconciliationAction(context: ScopeContext, plan: ReconciliationPlan, status: ActionRecord["status"]): ActionRecord | undefined {
+function reconciliationAction(
+  context: ScopeContext,
+  plan: ReconciliationPlan,
+  status: ActionRecord["status"],
+  phase: "all" | "canonical" | "providers" = "all",
+): ActionRecord | undefined {
   const writes: string[] = [];
   const removes: string[] = [];
-  if (plan.canonicalOperation === "write") writes.push(plan.canonicalPath);
-  if (plan.canonicalOperation === "remove") removes.push(plan.canonicalPath);
-  for (const operation of plan.providerOperations) {
-    (operation.operation === "write" ? writes : removes).push(operation.path);
+  if (phase !== "providers") {
+    if (plan.canonicalOperation === "write") writes.push(plan.canonicalPath);
+    if (plan.canonicalOperation === "remove") removes.push(plan.canonicalPath);
+  }
+  if (phase !== "canonical") {
+    for (const operation of plan.providerOperations) {
+      (operation.operation === "write" ? writes : removes).push(operation.path);
+    }
   }
   if (writes.length === 0 && removes.length === 0) return undefined;
   const reads = plan.sourcePath !== undefined
@@ -299,6 +310,7 @@ async function inventoryScope(
 
 async function fleetDiscovery(options: EngineOptions): Promise<DiscoveryResult> {
   const canonicalRoot = join(options.home, ".agents");
+  await requireUserRepository(canonicalRoot);
   const config = await loadConfig(canonicalRoot, options.home);
   const discovery = await discoverScopes({ home: options.home, roots: config.roots });
   const comparablePaths = new Map<string, Promise<string>>();
@@ -602,8 +614,79 @@ async function executeReconciliationPlan(
   if (plan.canonicalOperation === "write") await writeCanonicalFromPlan(context, plan);
   else if (plan.canonicalOperation === "remove") await removeCanonicalFromPlan(context, plan);
   for (const operation of plan.providerOperations) await executeProviderOperation(context, plan, operation);
-  if (plan.source !== "conflict") await persistConvergedPlan(context, plan, options);
+  if (plan.source !== "conflict" && requiresLedgerPersistence(plan)) {
+    await persistConvergedPlan(context, plan, options);
+  }
   return reconciliationAction(context, plan, "completed");
+}
+
+function requiresLedgerPersistence(plan: ReconciliationPlan): boolean {
+  return plan.source === "delete"
+    || plan.canRecordBaseline
+    || plan.canonicalOperation !== "none"
+    || plan.providerOperations.length > 0;
+}
+
+function managedUserPlans(context: ScopeContext): ReconciliationPlan[] {
+  return context.plans.filter((plan) => plan.source !== "conflict" && plan.source !== "invalid");
+}
+
+function changesUserCanonical(plan: ReconciliationPlan): boolean {
+  return plan.canonicalOperation !== "none"
+    || plan.sides.canonical.delta === "added"
+    || plan.sides.canonical.delta === "modified"
+    || plan.sides.canonical.delta === "deleted";
+}
+
+function changeOrigins(plan: ReconciliationPlan): string[] {
+  return Object.values(plan.sides)
+    .filter((side) => side.delta === "added" || side.delta === "modified" || side.delta === "deleted")
+    .map((side) => side.path);
+}
+
+function commitAction(scope: Scope, commit: ManagedCommit): ActionRecord {
+  return {
+    id: actionId(scope, "commit-user-source"),
+    status: "completed",
+    description: `Committed ${commit.files.length} user canonical ${commit.files.length === 1 ? "path" : "paths"}.`,
+    scope: scope.type,
+    scopePath: scope.path,
+    reads: commit.files,
+    commit,
+  };
+}
+
+async function synchronizeUserContext(
+  context: ScopeContext,
+  options: EngineOptions,
+  actions: ActionRecord[],
+): Promise<void> {
+  const plans = managedUserPlans(context);
+  for (const plan of plans) {
+    if (plan.canonicalOperation === "write") await writeCanonicalFromPlan(context, plan);
+    else if (plan.canonicalOperation === "remove") await removeCanonicalFromPlan(context, plan);
+    const action = reconciliationAction(context, plan, "completed", "canonical");
+    if (action !== undefined) actions.push(action);
+  }
+
+  const commitPlans = context.plans.filter((plan) => plan.source !== "invalid" && changesUserCanonical(plan));
+  const commit = await commitManagedChanges({
+    root: context.scope.canonical,
+    paths: [configPath(context.scope.canonical), ...commitPlans.map((plan) => plan.canonicalPath)],
+    origins: commitPlans.flatMap(changeOrigins),
+    message: "overlord: synchronize",
+  });
+  if (commit !== null) actions.push(commitAction(context.scope, commit));
+
+  for (const plan of context.plans) {
+    if (plan.source === "invalid" || (plan.source === "conflict" && plan.providerOperations.length === 0)) continue;
+    for (const operation of plan.providerOperations) await executeProviderOperation(context, plan, operation);
+    const action = reconciliationAction(context, plan, "completed", "providers");
+    if (action !== undefined) actions.push(action);
+    if (plan.source !== "conflict" && requiresLedgerPersistence(plan)) {
+      await persistConvergedPlan(context, plan, options);
+    }
+  }
 }
 
 async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPhysicalPath: string | undefined): Promise<ActionRecord[]> {
@@ -617,10 +700,12 @@ async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPh
     await assertScopeIdentity(scope, expectedPhysicalPath);
     const context = await inventoryScope(scope, options, expectedPhysicalPath);
     if (!blocksMutation(context)) {
-      for (const plan of context.plans) {
-        const action = await executeReconciliationPlan(context, plan, options);
-        if (action !== undefined) actions.push(action);
-        else if (plan.canRecordBaseline) await persistConvergedPlan(context, plan, options);
+      if (scope.type === "user") await synchronizeUserContext(context, options, actions);
+      else {
+        for (const plan of context.plans) {
+          const action = await executeReconciliationPlan(context, plan, options);
+          if (action !== undefined) actions.push(action);
+        }
       }
     }
   } catch (error) {
@@ -698,6 +783,7 @@ export async function initialize(options: EngineOptions): Promise<OutputDocument
     await assertScopeIdentity(scope, expectedPhysicalPath);
     await assertInitializationParents();
     await loadConfig(scope.canonical, scope.path);
+    const repository = await ensureUserRepository(scope.canonical);
     for (const [index, directory] of directories.entries()) {
       if (await pathExists(directory)) {
         const metadata = await lstat(directory);
@@ -745,6 +831,25 @@ export async function initialize(options: EngineOptions): Promise<OutputDocument
         scope.path,
       ));
     }
+    const scopeIdentity = expectedPhysicalPath ?? await realpath(scope.path);
+    const firstInitialization = !(await pathExists(ledgerPath(scope.canonical, scopeIdentity)));
+    let commitPaths = [configuration, bundled];
+    if (!repository.hasHead || firstInitialization) {
+      commitPaths = [
+        configuration,
+        join(scope.canonical, "skills"),
+        join(scope.canonical, "overlord", "agents"),
+      ];
+    }
+    const commit = await commitManagedChanges({
+      root: scope.canonical,
+      paths: commitPaths,
+      origins: [],
+      message: "overlord: initialize",
+    });
+    if (commit !== null) actions.push(commitAction(scope, commit));
+    const ledger = await loadScopeLedger(scope.canonical, scopeIdentity);
+    await saveScopeLedger(scope.canonical, ledger);
   } catch (error) {
     failure = error;
   }

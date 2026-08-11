@@ -47,6 +47,7 @@ describe("scope ledger", () => {
     const root = await temporaryDirectory();
     const userCanonical = join(root, ".agents");
     const scope = join(root, "project");
+    await mkdir(join(userCanonical, ".git"), { recursive: true });
     await mkdir(scope);
     const scopeIdentity = await physicalScopeIdentity(scope);
     const ledger = emptyScopeLedger(scopeIdentity);
@@ -100,6 +101,7 @@ describe("scope ledger", () => {
     const firstAlias = join(root, "first-alias");
     await mkdir(firstScope);
     await mkdir(secondScope);
+    await mkdir(join(userCanonical, ".git"), { recursive: true });
     await symlink(firstScope, firstAlias);
     const firstIdentity = await physicalScopeIdentity(firstScope);
     const secondIdentity = await physicalScopeIdentity(secondScope);
@@ -133,6 +135,45 @@ describe("scope ledger", () => {
     expect(() => getLedgerEntry(firstLedger, secondKey)).toThrow(/scope identity/i);
   });
 
+  it("rejects ledger metadata redirected through a symlinked parent", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const userCanonical = join(root, ".agents");
+    const scope = join(root, "project");
+    await mkdir(join(userCanonical, ".git"), { recursive: true });
+    await mkdir(scope);
+    await symlink(outside, join(userCanonical, ".git/overlord"));
+    const scopeIdentity = await physicalScopeIdentity(scope);
+    const ledger = emptyScopeLedger(scopeIdentity);
+    const path = ledgerPath(userCanonical, scopeIdentity);
+    const redirected = join(outside, "scopes", basename(path));
+    await writeText(redirected, `${JSON.stringify(ledger)}\n`);
+
+    await expect(loadScopeLedger(userCanonical, scopeIdentity)).rejects.toMatchObject({ code: "permission-denied" });
+    await expect(saveScopeLedger(userCanonical, ledger)).rejects.toMatchObject({ code: "permission-denied" });
+    expect(await readFile(redirected, "utf8")).toBe(`${JSON.stringify(ledger)}\n`);
+  });
+
+  it("rejects a symlink in place of the ledger file", async () => {
+    const root = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const userCanonical = join(root, ".agents");
+    const scope = join(root, "project");
+    await mkdir(join(userCanonical, ".git"), { recursive: true });
+    await mkdir(scope);
+    const scopeIdentity = await physicalScopeIdentity(scope);
+    const ledger = emptyScopeLedger(scopeIdentity);
+    const path = ledgerPath(userCanonical, scopeIdentity);
+    const outsideFile = join(outside, "ledger.json");
+    await writeText(outsideFile, `${JSON.stringify(ledger)}\n`);
+    await mkdir(dirname(path), { recursive: true });
+    await symlink(outsideFile, path);
+
+    await expect(loadScopeLedger(userCanonical, scopeIdentity)).rejects.toMatchObject({ code: "permission-denied", path });
+    await expect(saveScopeLedger(userCanonical, ledger)).rejects.toMatchObject({ code: "permission-denied", path });
+    expect(await readFile(outsideFile, "utf8")).toBe(`${JSON.stringify(ledger)}\n`);
+  });
+
   it("rejects malformed and scope-mismatched ledger files", async () => {
     const root = await temporaryDirectory();
     const userCanonical = join(root, ".agents");
@@ -153,7 +194,7 @@ describe("scope ledger", () => {
 });
 
 describe("ledger digests", () => {
-  it("detects file bytes and permission modes without using timestamps", async () => {
+  it("detects file bytes without treating agent permission bits as content", async () => {
     const root = await temporaryDirectory();
     const file = join(root, "reviewer.md");
     await writeFile(file, "first\n");
@@ -169,12 +210,12 @@ describe("ledger digests", () => {
 
     expect(initial).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(changedBytes).not.toBe(initial);
-    expect(changedMode).not.toBe(initial);
+    expect(changedMode).toBe(initial);
     await chmod(file, 0o640);
     expect(await digestFile(file)).toBe(initial);
   });
 
-  it("hashes a stable, sorted skill tree including directories and modes", async () => {
+  it("hashes skill files and executable bits while ignoring empty directories and directory modes", async () => {
     const root = await temporaryDirectory();
     const skill = join(root, "verify-build");
     const empty = join(skill, "references/empty");
@@ -185,9 +226,12 @@ describe("ledger digests", () => {
     const initial = await digestSkillTree(skill);
 
     await chmod(empty, 0o700);
-    expect(await digestSkillTree(skill)).not.toBe(initial);
-    await chmod(empty, 0o750);
     expect(await digestSkillTree(skill)).toBe(initial);
+    await mkdir(join(skill, "another-empty"));
+    expect(await digestSkillTree(skill)).toBe(initial);
+    await chmod(join(skill, "scripts/check.sh"), 0o755);
+    expect(await digestSkillTree(skill)).not.toBe(initial);
+    await chmod(join(skill, "scripts/check.sh"), 0o644);
     await writeText(join(skill, "scripts/check.sh"), "#!/bin/sh\nexit 0\n");
     expect(await digestSkillTree(skill)).not.toBe(initial);
   });
@@ -210,6 +254,19 @@ describe("ledger digests", () => {
 
     await writeText(join(skill, ".env.example"), "SAFE=false\n");
     expect(await digestSkillTree(skill)).not.toBe(initial);
+  });
+
+  it("rejects nested Git metadata from the synchronized skill value", async () => {
+    const root = await temporaryDirectory();
+    const skill = join(root, "verify-build");
+    await writeText(join(skill, "SKILL.md"), "skill\n");
+    const metadata = join(skill, ".git");
+    await writeText(join(metadata, "config"), "[core]\n\trepositoryformatversion = 0\n");
+
+    await expect(digestSkillTree(skill)).rejects.toMatchObject({
+      code: "unsupported-entry",
+      path: metadata,
+    });
   });
 
   it("rejects file, root, internal, and ignored-name symlinks", async () => {

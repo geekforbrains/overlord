@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { lstat, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { inspect, synchronize } from "../src/engine.js";
 import { ledgerPath, physicalScopeIdentity } from "../src/ledger.js";
 import type { EngineOptions } from "../src/types.js";
-import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
+import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 
 afterEach(cleanupTemporaryDirectories);
 
@@ -25,10 +25,34 @@ async function fixture() {
     },
   };
   await writeText(join(home, ".agents/overlord/overlord.yaml"), `roots:\n  - ${root}\n`);
+  await prepareUserRepository(home);
   return { home, project, options };
 }
 
 describe("last-sync reconciliation", () => {
+  it("treats empty directories and non-executable permission differences as non-content", async () => {
+    const { project, options } = await fixture();
+    const canonical = join(project, ".agents/skills/verify-build");
+    const claude = join(project, ".claude/skills/verify-build");
+    await writeText(join(canonical, "SKILL.md"), validSkill, 0o644);
+    await writeText(join(claude, "SKILL.md"), validSkill, 0o600);
+    await writeText(join(canonical, "scripts/check.sh"), "#!/bin/sh\n", 0o744);
+    await writeText(join(claude, "scripts/check.sh"), "#!/bin/sh\n", 0o711);
+    await mkdir(join(claude, "references/empty"), { recursive: true, mode: 0o700 });
+
+    const result = await synchronize(options);
+
+    expect(result.status).toBe("ok");
+    expect(result.definitions).toContainEqual(expect.objectContaining({
+      kind: "skill",
+      name: "verify-build",
+      scopePath: project,
+      state: "synced",
+    }));
+    expect((await lstat(join(canonical, "SKILL.md"))).mode & 0o777).toBe(0o644);
+    expect((await lstat(join(claude, "SKILL.md"))).mode & 0o777).toBe(0o600);
+  });
+
   it("propagates a canonical skill edit made after the baseline", async () => {
     const { project, options } = await fixture();
     const canonical = join(project, ".agents/skills/verify-build/SKILL.md");

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { initialize, inspect, synchronize } from "../src/engine.js";
 import { acquireScopeLock, assertNoSymlinkedParent, lockPathForScope } from "../src/filesystem.js";
 import type { EngineOptions } from "../src/types.js";
-import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
+import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 
 afterEach(cleanupTemporaryDirectories);
 
@@ -29,6 +29,7 @@ async function fleetFixture() {
     join(home, ".agents/overlord/overlord.yaml"),
     `roots:\n  - ${fleetRoot}\n`,
   );
+  await prepareUserRepository(home);
   return { home, fleetRoot, options };
 }
 
@@ -88,6 +89,7 @@ describe("fleet safety contracts", () => {
     await writeText(join(home, ".agents/skills/verify-build/SKILL.md"), validSkill);
     await symlink(outside, join(home, ".claude"));
     const options: EngineOptions = { home, env: {} };
+    await prepareUserRepository(home);
 
     const result = await synchronize(options);
 
@@ -634,6 +636,7 @@ describe("fleet safety contracts", () => {
     };
     await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
+    await prepareUserRepository(home);
 
     const result = await synchronize(options);
 
@@ -657,6 +660,7 @@ describe("fleet safety contracts", () => {
     await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
     await symlink(join(home, ".agents"), codexAlias);
+    await prepareUserRepository(home);
 
     const result = await synchronize(options);
 
@@ -677,6 +681,7 @@ describe("fleet safety contracts", () => {
     };
     await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
+    await prepareUserRepository(home);
     const pathsAlias = await realpath(caseAlias).then(() => true, () => false);
 
     const result = await synchronize(options);
@@ -696,6 +701,7 @@ describe("fleet safety contracts", () => {
     };
     await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
+    await prepareUserRepository(home);
 
     const result = await synchronize(options);
 

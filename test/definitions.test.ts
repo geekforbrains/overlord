@@ -112,6 +112,24 @@ describe("canonical definitions", () => {
     expect(loaded.diagnostics).toContainEqual(expect.objectContaining({ code: "unsupported-skill-symlink" }));
   });
 
+  it.each([".git", ".GIT"])(
+    "rejects nested Git metadata %s that the source repository cannot version as skill files",
+    async (metadataName) => {
+      const root = await temporaryDirectory();
+      const skill = join(root, ".agents/skills/verify-build");
+      await writeText(join(skill, "SKILL.md"), validSkill);
+      await writeText(join(skill, metadataName, "config"), "[core]\n\trepositoryformatversion = 0\n");
+
+      const loaded = await loadCanonicalScope(join(root, ".agents"));
+
+      expect(loaded.skills[0]?.valid).toBe(false);
+      expect(loaded.diagnostics).toContainEqual(expect.objectContaining({
+        code: "unsupported-skill-git-metadata",
+        path: join(skill, metadataName),
+      }));
+    },
+  );
+
   it("rejects an internal symlink chain that physically escapes the skill", async () => {
     const root = await temporaryDirectory();
     const skills = join(root, ".agents/skills");

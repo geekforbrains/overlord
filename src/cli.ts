@@ -197,12 +197,22 @@ function definitionLine(definition: DefinitionRecord): string {
   return `  ${marker[definition.state].padEnd(9)} ${definition.kind}:${definition.name}`;
 }
 
+function writeAction(
+  write: (chunk: string) => void,
+  action: ActionRecord,
+  marker: string,
+): void {
+  write(`${marker} ${action.description}\n`);
+  if (action.commit === undefined) return;
+  write(`  commit: ${action.commit.sha} ${action.commit.message}\n`);
+  for (const origin of action.commit.origins) write(`  origin: ${origin}\n`);
+  for (const file of action.commit.files) write(`  file: ${file}\n`);
+}
+
 function writeHuman(io: CliIo, document: OutputDocument): void {
   if (document.status === "error") {
     io.stderr(`overlord: ${document.error?.message ?? "Unknown error"}\n`);
-    for (const action of document.actions ?? []) {
-      io.stderr(`completed: ${action.description}\n`);
-    }
+    for (const action of document.actions ?? []) writeAction(io.stderr, action, "completed:");
     if (document.error?.code === "usage") io.stderr("Try 'overlord --help' for usage.\n");
     return;
   }
@@ -214,7 +224,7 @@ function writeHuman(io: CliIo, document: OutputDocument): void {
     for (const definition of definitions) io.stdout(`${definitionLine(definition)}\n`);
   }
   for (const action of document.actions ?? []) {
-    io.stdout(`${action.status === "completed" ? "+" : "?"} ${action.description}\n`);
+    writeAction(io.stdout, action, action.status === "completed" ? "+" : "?");
   }
   for (const entry of document.diagnostics ?? []) {
     const destination = entry.severity === "info" ? io.stdout : io.stderr;

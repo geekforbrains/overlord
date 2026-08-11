@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { IGNORED_SKILL_FILES } from "./filesystem.js";
+import { IGNORED_SKILL_FILES, assertNoSymlinkedParent, reservedSkillArtifact } from "./filesystem.js";
 import type { ArtifactKind } from "./types.js";
 
 export type LedgerEndpoint = "canonical" | "claude" | "codex";
@@ -101,6 +101,51 @@ export function emptyScopeLedger(scopeIdentity: string): ScopeLedger {
   return { scopeIdentity, entries: { agent: {}, skill: {} } };
 }
 
+async function assertLedgerMetadataParents(
+  userCanonicalRoot: string,
+  path: string,
+  requireRepository: boolean,
+): Promise<void> {
+  const metadataRoot = join(userCanonicalRoot, ".git");
+  let metadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    metadata = await lstat(metadataRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (metadata === undefined) {
+    if (!requireRepository) return;
+    throw Object.assign(new Error(`Ledger metadata requires a physical Git directory: ${metadataRoot}`), {
+      code: "permission-denied",
+      path: metadataRoot,
+    });
+  }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw Object.assign(new Error(`Ledger metadata requires a physical Git directory: ${metadataRoot}`), {
+      code: "permission-denied",
+      path: metadataRoot,
+    });
+  }
+  await assertNoSymlinkedParent(path, metadataRoot);
+}
+
+async function physicalLedgerFileExists(path: string): Promise<boolean> {
+  let metadata: Awaited<ReturnType<typeof lstat>>;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw Object.assign(new Error(`Ledger must be a physical file: ${path}`), {
+      code: "permission-denied",
+      path,
+    });
+  }
+  return true;
+}
+
 function normalizeReceipts(value: unknown, path: string): LedgerReceipts {
   if (!isRecord(value)) throw invalidLedger(path, "entry receipts must be an object");
   assertOnlyKeys(value, new Set(ENDPOINTS), path, "entry receipts");
@@ -164,13 +209,9 @@ function normalizeLedger(value: unknown, expectedScopeIdentity: string, path: st
 /** Read one scope's receipts. A missing file is an empty ledger and causes no writes. */
 export async function loadScopeLedger(userCanonicalRoot: string, scopeIdentity: string): Promise<ScopeLedger> {
   const path = ledgerPath(userCanonicalRoot, scopeIdentity);
-  let source: string;
-  try {
-    source = await readFile(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyScopeLedger(scopeIdentity);
-    throw error;
-  }
+  await assertLedgerMetadataParents(userCanonicalRoot, path, false);
+  if (!(await physicalLedgerFileExists(path))) return emptyScopeLedger(scopeIdentity);
+  const source = await readFile(path, "utf8");
 
   let document: unknown;
   try {
@@ -193,6 +234,8 @@ function sortJson(value: unknown): unknown {
 /** Replace one scope's ledger through a same-directory temporary file and rename. */
 export async function saveScopeLedger(userCanonicalRoot: string, ledger: ScopeLedger): Promise<void> {
   const path = ledgerPath(userCanonicalRoot, ledger.scopeIdentity);
+  await assertLedgerMetadataParents(userCanonicalRoot, path, true);
+  await physicalLedgerFileExists(path);
   const normalized = normalizeLedger(ledger, ledger.scopeIdentity, path);
   const source = `${JSON.stringify(sortJson(normalized), null, 2)}\n`;
   const directory = dirname(path);
@@ -279,23 +322,21 @@ function digestResult(hash: ReturnType<typeof createHash>): string {
   return `sha256:${hash.digest("hex")}`;
 }
 
-/** Hash one physical file using its raw bytes and portable permission bits. */
+/** Hash one agent file using its raw bytes. */
 export async function digestFile(path: string): Promise<string> {
   const metadata = await lstat(path);
   if (metadata.isSymbolicLink()) throw unsupportedSymlink(path);
   if (!metadata.isFile()) throw unsupportedEntry(path);
   const hash = createHash("sha256");
-  addHashField(hash, "overlord-file-digest-v1");
-  addHashField(hash, String(metadata.mode & 0o777));
+  addHashField(hash, "overlord-agent-file");
   addHashField(hash, await readFile(path));
   return digestResult(hash);
 }
 
 interface TreeDigestEntry {
   relativePath: string;
-  kind: "directory" | "file";
-  mode: number;
-  contents?: Buffer;
+  executable: boolean;
+  contents: Buffer;
 }
 
 async function collectTreeEntries(root: string, current: string, entries: TreeDigestEntry[]): Promise<void> {
@@ -305,35 +346,38 @@ async function collectTreeEntries(root: string, current: string, entries: TreeDi
     const path = join(current, child.name);
     if (child.isSymbolicLink()) throw unsupportedSymlink(path);
     if (ignoredSkillArtifact(child.name)) continue;
+    if (reservedSkillArtifact(child.name)) throw unsupportedEntry(path);
     const metadata = await lstat(path);
     if (metadata.isSymbolicLink()) throw unsupportedSymlink(path);
     const relativePath = relative(root, path).split(sep).join("/");
     if (metadata.isDirectory()) {
-      entries.push({ relativePath, kind: "directory", mode: metadata.mode & 0o777 });
       await collectTreeEntries(root, path, entries);
     } else if (metadata.isFile()) {
-      entries.push({ relativePath, kind: "file", mode: metadata.mode & 0o777, contents: await readFile(path) });
+      entries.push({
+        relativePath,
+        executable: (metadata.mode & 0o111) !== 0,
+        contents: await readFile(path),
+      });
     } else {
       throw unsupportedEntry(path);
     }
   }
 }
 
-/** Hash a complete skill value: sorted paths, entry kinds, modes, empty directories, and file bytes. */
+/** Hash the Git-representable skill value: sorted file paths, executable bits, and bytes. */
 export async function digestSkillTree(root: string): Promise<string> {
   const rootMetadata = await lstat(root);
   if (rootMetadata.isSymbolicLink()) throw unsupportedSymlink(root);
   if (!rootMetadata.isDirectory()) throw unsupportedEntry(root);
-  const entries: TreeDigestEntry[] = [{ relativePath: ".", kind: "directory", mode: rootMetadata.mode & 0o777 }];
+  const entries: TreeDigestEntry[] = [];
   await collectTreeEntries(root, root, entries);
 
   const hash = createHash("sha256");
-  addHashField(hash, "overlord-skill-tree-digest-v1");
+  addHashField(hash, "overlord-skill-files");
   for (const entry of entries) {
-    addHashField(hash, entry.kind);
     addHashField(hash, entry.relativePath);
-    addHashField(hash, String(entry.mode));
-    if (entry.contents !== undefined) addHashField(hash, entry.contents);
+    addHashField(hash, entry.executable ? "executable" : "regular");
+    addHashField(hash, entry.contents);
   }
   return digestResult(hash);
 }

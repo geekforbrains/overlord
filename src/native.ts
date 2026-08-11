@@ -2,7 +2,7 @@ import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { basename, extname, join, relative, resolve } from "node:path";
 
 import { isPortableSkillName } from "./definitions.js";
-import { IGNORED_SKILL_FILES } from "./filesystem.js";
+import { IGNORED_SKILL_FILES, reservedSkillArtifact } from "./filesystem.js";
 import { parseFrontmatter } from "./frontmatter.js";
 import { parseClaudeAgent, parseCodexAgent } from "./render.js";
 import type { TargetPaths } from "./targets.js";
@@ -71,6 +71,9 @@ async function nativeSkillTreeError(root: string): Promise<string | undefined> {
       const path = join(directory, entry.name);
       if (entry.isSymbolicLink()) {
         return `native skill contains unsupported symlink '${relative(physicalRoot, path)}'`;
+      }
+      if (reservedSkillArtifact(entry.name)) {
+        return `native skill contains unsupported nested Git metadata '${relative(physicalRoot, path)}'`;
       }
       try {
         if (entry.isDirectory()) {

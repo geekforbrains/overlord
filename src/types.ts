@@ -86,6 +86,14 @@ export interface DefinitionRecord {
   conflictsWith?: string[];
 }
 
+export interface GitCommitRecord {
+  repository: string;
+  sha: string;
+  message: string;
+  origins: string[];
+  files: string[];
+}
+
 export interface ActionRecord {
   id: string;
   status: "planned" | "completed";
@@ -95,6 +103,7 @@ export interface ActionRecord {
   reads?: string[];
   writes?: string[];
   removes?: string[];
+  commit?: GitCommitRecord;
 }
 
 export interface SummaryRecord {

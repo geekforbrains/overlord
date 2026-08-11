@@ -3,7 +3,7 @@ import { lstat, readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { inspect, synchronize } from "../src/engine.js";
-import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
+import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 import type { EngineOptions } from "../src/types.js";
 
 afterEach(cleanupTemporaryDirectories);
@@ -34,6 +34,7 @@ async function fixture() {
     join(home, ".agents/overlord/overlord.yaml"),
     `roots:\n  - ${discoveryRoot}\n`,
   );
+  await prepareUserRepository(home);
   return { home, discoveryRoot, options };
 }
 
@@ -142,6 +143,7 @@ describe("fleet synchronization", () => {
       join(home, ".agents/overlord/overlord.yaml"),
       `roots:\n  - ${missing}\n`,
     );
+    await prepareUserRepository(home);
 
     const result = await inspect(options);
 
@@ -162,6 +164,7 @@ describe("fleet synchronization", () => {
       join(home, ".agents/overlord/overlord.yaml"),
       `roots:\n  - ${discoveryRoot}\n`,
     );
+    await prepareUserRepository(home);
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
 
     const synced = await synchronize(options);
@@ -192,6 +195,7 @@ describe("fleet synchronization", () => {
       join(home, ".agents/overlord/overlord.yaml"),
       `roots:\n  - ${discoveryRoot}\n`,
     );
+    await prepareUserRepository(home);
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
 
     const result = await synchronize(options);
@@ -216,6 +220,7 @@ describe("fleet synchronization", () => {
       join(home, ".agents/overlord/overlord.yaml"),
       `roots:\n  - ${discoveryRoot}\n`,
     );
+    await prepareUserRepository(home);
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
     await writeText(join(project, ".agents/skills/project-skill/SKILL.md"), namedSkill("project-skill"));
 

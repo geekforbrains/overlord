@@ -294,7 +294,7 @@ async function buildSkillPlan(
     if (sides.canonical.present && !sides.claude.present) {
       return { ...base, source: "canonical", state: "missing", providerOperations: [{ target: "claude", operation: "write", path: sides.claude.path }] };
     }
-    return { ...base, canRecordBaseline: sides.canonical.present && sides.claude.present };
+    return base;
   }
   if (changedSides.length === 1) {
     const side = changedSides[0]!;
@@ -465,7 +465,6 @@ async function buildAgentPlan(
       source: operations.length > 0 ? "canonical" : "none",
       state: operations.length > 0 ? "missing" : "synced",
       providerOperations: operations,
-      canRecordBaseline: operations.length === 0,
     };
   }
 
@@ -506,7 +505,29 @@ async function buildAgentPlan(
   }
 
   if (changedSides.every((side) => deleted(side.delta))) {
-    return { ...base, source: "delete", state: "changed", canonicalOperation: "none", providerOperations: [] };
+    return {
+      ...base,
+      source: "delete",
+      state: "changed",
+      canonicalOperation: sides.canonical.present ? "remove" : "none",
+      providerOperations: (["claude", "codex"] as const)
+        .filter((target) => sides[target].present)
+        .map((target) => ({ target, operation: "remove", path: sides[target].path })),
+    };
+  }
+  if (canonical !== undefined
+    && changed(sides.canonical.delta)
+    && !deleted(sides.canonical.delta)) {
+    const changedProviders = [sides.claude, sides.codex].filter((side) => changed(side.delta));
+    if (changedProviders.every((side) => side.native !== undefined
+      && nativeMatchesCanonical(side.native, canonical, side.endpoint as TargetName))) {
+      return {
+        ...base,
+        source: "canonical",
+        state: "changed",
+        providerOperations: providerOperationsForAgent(base, canonical, true),
+      };
+    }
   }
   if (canonical !== undefined && expectedAgentMatchesAll(base, canonical)) {
     return {

@@ -98,6 +98,23 @@ describe("native inventory", () => {
     }));
   });
 
+  it("marks a skill with nested Git metadata invalid", async () => {
+    const scope = await temporaryDirectory();
+    const paths = targetPaths(scope);
+    const skill = join(paths.claude.skills, "nested-repository");
+    await writeText(join(skill, "SKILL.md"), skillSource("nested-repository"));
+    await writeText(join(skill, ".git/config"), "[core]\n\trepositoryformatversion = 0\n");
+
+    const inventory = await scanNative(paths);
+
+    expect(inventory).toContainEqual(expect.objectContaining({
+      kind: "skill",
+      name: "nested-repository",
+      valid: false,
+      evidence: expect.stringMatching(/Git metadata/i),
+    }));
+  });
+
   it("requires existing artifact roots to be physical directories", async () => {
     const scope = await temporaryDirectory();
     const paths = targetPaths(scope);

@@ -1,11 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { runCli } from "../src/cli.js";
-import { cleanupTemporaryDirectories, temporaryDirectory, validSkill, writeText } from "./helpers.js";
+import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validSkill, writeText } from "./helpers.js";
 
 afterEach(cleanupTemporaryDirectories);
 
@@ -57,6 +57,7 @@ async function fleetFixture() {
     `roots:\n  - ${JSON.stringify(root)}\n`,
   );
   await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
+  await prepareUserRepository(home);
   return { home, project };
 }
 
@@ -70,6 +71,7 @@ describe("CLI contract", () => {
     const home = await temporaryDirectory();
     const human = captureIo();
     const captured = captureIo();
+    if (command !== "init") await prepareUserRepository(home);
 
     expect(await runCli([command], human.io, runtime(home))).toBe(0);
     expect(human.stdout()).toContain(`${command}: ok`);
@@ -78,6 +80,54 @@ describe("CLI contract", () => {
     expect(code).toBe(0);
     expect(await parseSingleJson(captured.stdout())).toMatchObject({ command, status: "ok" });
     expect(captured.stderr()).not.toContain("Try 'overlord --help'");
+  });
+
+  it("fails status on an uninitialized home without creating a Git repository", async () => {
+    const home = await temporaryDirectory();
+    const captured = captureIo();
+
+    const code = await runCli(["status", "--json"], captured.io, runtime(home));
+    const document = await parseSingleJson(captured.stdout());
+
+    expect(code).toBe(2);
+    expect(document).toMatchObject({ status: "error", error: { code: "permission-denied" } });
+    await expect(lstat(join(home, ".agents/.git"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("emits schema-valid fixed commit metadata from init", async () => {
+    const home = await temporaryDirectory();
+    const captured = captureIo();
+
+    const code = await runCli(["init", "--json"], captured.io, runtime(home));
+    const document = await parseSingleJson(captured.stdout());
+
+    expect(code).toBe(0);
+    expect(document.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        status: "completed",
+        commit: expect.objectContaining({
+          repository: join(home, ".agents"),
+          message: "overlord: initialize",
+          origins: [],
+          files: expect.arrayContaining([
+            join(home, ".agents/overlord/overlord.yaml"),
+            join(home, ".agents/skills/overlord/SKILL.md"),
+          ]),
+        }),
+      }),
+    ]));
+  });
+
+  it("reports a physical but invalid Git directory as a permission error", async () => {
+    const home = await temporaryDirectory();
+    const captured = captureIo();
+    await mkdir(join(home, ".agents/.git"), { recursive: true });
+
+    const code = await runCli(["status", "--json"], captured.io, runtime(home));
+    const document = await parseSingleJson(captured.stdout());
+
+    expect(code).toBe(2);
+    expect(document).toMatchObject({ status: "error", error: { code: "permission-denied" } });
   });
 
   it("reports the fleet as scopes and never emits the legacy singular scope or targets", async () => {
@@ -187,6 +237,21 @@ describe("CLI contract", () => {
     expect(valid).toBe(false);
   });
 
+  it("prints completed commit metadata when init fails after committing", async () => {
+    const home = await temporaryDirectory();
+    const outside = await temporaryDirectory();
+    const captured = captureIo();
+    await prepareUserRepository(home);
+    await symlink(outside, join(home, ".agents/.git/overlord"));
+
+    const code = await runCli(["init"], captured.io, runtime(home));
+
+    expect(code).toBe(2);
+    expect(captured.stderr()).toMatch(/commit: [0-9a-f]{40,64} overlord: initialize/);
+    expect(captured.stderr()).toContain(`file: ${join(home, ".agents/overlord/overlord.yaml")}`);
+    expect(captured.stderr()).toContain(`file: ${join(home, ".agents/skills/overlord/SKILL.md")}`);
+  });
+
   it("rejects an invalid fleet configuration before init mutates user files", async () => {
     const home = await temporaryDirectory();
     const captured = captureIo();
@@ -198,6 +263,7 @@ describe("CLI contract", () => {
     expect(code).toBe(2);
     expect(document).toMatchObject({ status: "error", error: { code: "config-invalid" } });
     expect(document).not.toHaveProperty("actions");
+    await expect(lstat(join(home, ".agents/.git"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(join(home, ".agents/skills/overlord/SKILL.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

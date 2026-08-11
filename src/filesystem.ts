@@ -11,9 +11,14 @@ export const IGNORED_SKILL_FILES = new Set([
   "ehthumbs.db",
 ]);
 
-function ignoredSkillArtifact(path: string): boolean {
+export function ignoredSkillArtifact(path: string): boolean {
   const name = basename(path);
   return IGNORED_SKILL_FILES.has(name) || name.startsWith("._");
+}
+
+/** Git control metadata cannot be represented as ordinary files by the owning source repository. */
+export function reservedSkillArtifact(path: string): boolean {
+  return basename(path).toLowerCase() === ".git";
 }
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -40,6 +45,15 @@ function unsupportedSkillSymlink(root: string, path: string): Error {
   });
 }
 
+function unsupportedSkillGitMetadata(root: string, path: string): Error {
+  return Object.assign(new Error(
+    `Skill contains nested Git metadata '${relative(root, path)}'; nested repositories are not supported.`,
+  ), {
+    code: "permission-denied",
+    path,
+  });
+}
+
 async function treeEntries(root: string, current = root): Promise<TreeEntry[]> {
   const entries: TreeEntry[] = [];
   const children = await readdir(current, { withFileTypes: true });
@@ -49,6 +63,7 @@ async function treeEntries(root: string, current = root): Promise<TreeEntry[]> {
     const relativePath = relative(root, path).split(sep).join("/");
     if (child.isSymbolicLink()) throw unsupportedSkillSymlink(root, path);
     if (ignoredSkillArtifact(child.name)) continue;
+    if (reservedSkillArtifact(child.name)) throw unsupportedSkillGitMetadata(root, path);
     const info = await lstat(path);
     if (child.isDirectory()) {
       entries.push({ relativePath, kind: "directory", mode: info.mode & 0o777, contents: Buffer.alloc(0) });
@@ -132,17 +147,23 @@ export async function assertNoSymlinkedParent(
 }
 
 export async function compareDirectories(left: string, right: string): Promise<{ equal: boolean; evidence?: string }> {
-  const [leftEntries, rightEntries] = await Promise.all([treeEntries(left), treeEntries(right)]);
+  const [leftTree, rightTree] = await Promise.all([treeEntries(left), treeEntries(right)]);
+  const leftEntries = leftTree.filter((entry) => entry.kind === "file");
+  const rightEntries = rightTree.filter((entry) => entry.kind === "file");
   const count = Math.max(leftEntries.length, rightEntries.length);
   for (let index = 0; index < count; index += 1) {
     const leftEntry = leftEntries[index];
     const rightEntry = rightEntries[index];
     if (leftEntry === undefined) return { equal: false, evidence: `extra native file ${rightEntry?.relativePath ?? "unknown"}` };
     if (rightEntry === undefined) return { equal: false, evidence: `native output is missing ${leftEntry.relativePath}` };
-    if (leftEntry.relativePath !== rightEntry.relativePath || leftEntry.kind !== rightEntry.kind) {
+    if (leftEntry.relativePath !== rightEntry.relativePath) {
       return { equal: false, evidence: `tree differs at ${leftEntry.relativePath}` };
     }
-    if (leftEntry.mode !== rightEntry.mode) return { equal: false, evidence: `mode differs at ${leftEntry.relativePath}` };
+    const leftExecutable = (leftEntry.mode & 0o111) !== 0;
+    const rightExecutable = (rightEntry.mode & 0o111) !== 0;
+    if (leftExecutable !== rightExecutable) {
+      return { equal: false, evidence: `executable bit differs at ${leftEntry.relativePath}` };
+    }
     if (!leftEntry.contents.equals(rightEntry.contents)) return { equal: false, evidence: `content differs at ${leftEntry.relativePath}` };
   }
   return { equal: true };

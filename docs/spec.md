@@ -24,11 +24,11 @@ roots:
   - /absolute/path/to/another-parent
 ```
 
-`roots` MUST be an array; unknown keys MUST make the configuration invalid. The configuration has no version field or automatic migration mechanism. Breaking configuration changes MUST be documented when they are introduced rather than inferred or migrated by the program.
+`roots` MUST be an array; unknown keys MUST make the configuration invalid. The configuration has no version field. Breaking configuration changes MUST be documented when they are introduced.
 
 Each root MUST be an absolute path or start with `~/`; a `~/` root MUST be expanded against the home directory, every result MUST be normalized, and duplicate normalized paths MUST be removed while preserving first occurrence order.
 
-A missing configuration file MUST behave as an empty `roots` list, so user-level synchronization remains available before configuration.
+A missing configuration file inside an initialized user repository MUST behave as an empty `roots` list. This does not remove the command-initialization precondition in section 10.
 
 The configuration is user-level fleet configuration only; project-local configuration files are not read.
 
@@ -89,7 +89,7 @@ Project-native locations are:
 <project>/.codex/agents/<name>.toml
 ```
 
-User-native locations default to `~/.claude/{skills,agents}` and `~/.codex/{skills,agents}`.
+User-native locations default to `~/.claude/skills`, `~/.claude/agents`, and `~/.codex/agents`.
 
 `CLAUDE_CONFIG_DIR` and `CODEX_HOME` MAY override the corresponding user-native root; an absolute value is used directly and a relative value is resolved against home, never against the process working directory.
 
@@ -99,7 +99,7 @@ Codex reads canonical skills directly from `<scope>/.agents/skills`, so Overlord
 
 Claude skills MUST be materialized as physical directories under `.claude/skills`; canonical agents MUST be deterministically rendered as physical files in both enabled native agent locations.
 
-The user source at `~/.agents` MUST be a Git repository initialized and maintained by Overlord. A project source at `<project>/.agents` belongs to its containing project; Overlord MUST NOT initialize, stage, commit, alter ignore rules in, or push that project repository.
+The user source at `~/.agents` MUST be a dedicated Git repository initialized and maintained by Overlord. Its `.git` entry MUST be a physical directory, and the repository's physical work-tree top level MUST be the user canonical root. A Git worktree file, symlinked `.git`, or repository configured with another work tree MUST be rejected. A project source at `<project>/.agents` belongs to its containing project; Overlord MUST NOT inspect or otherwise invoke Git in that project repository.
 
 ## 5. Canonical skill format
 
@@ -109,7 +109,7 @@ The `name` field MUST equal the directory name, MUST contain 1–64 lowercase AS
 
 The `description` field MUST be a non-empty string no longer than 1,024 characters.
 
-The remaining skill tree is opaque payload and MUST be copied byte-for-byte with relative paths, relevant file modes, and empty directories preserved.
+The synchronized skill value is its file paths, file bytes, and executable bits. Empty directories, directory permission bits, and non-executable file permission differences MUST NOT be treated as changes because the user Git repository cannot preserve them. Materialization MAY copy those incidental properties, but reconciliation and history MUST use the Git-representable value. A `.git` entry or case variant anywhere inside a skill MUST be invalid because the owning source repository would otherwise record nested repository metadata instead of the skill's ordinary files.
 
 Every symlink inside a canonical or provider-native skill, including a top-level skill symlink and an internal payload symlink, MUST be invalid.
 
@@ -152,7 +152,7 @@ Overlord MUST inventory canonical and provider-native files on every run without
 
 Claude agent inventory is recursive below `.claude/agents`; Codex agent inventory includes immediate `.toml` files below `.codex/agents`; skill inventory includes immediate child directories below canonical and Claude skill roots. `.codex/skills` is outside inventory because Codex reads `.agents/skills` directly.
 
-Overlord MUST retain a machine-local record of the last successfully synchronized content for every definition and endpoint. This ledger MUST live below `~/.agents/.git`, MUST be keyed by physical scope path and provider endpoint, and MUST NOT add state files to a project repository. The ledger is synchronization metadata, not canonical skill or agent content.
+Overlord MUST retain a machine-local record of the last successfully synchronized content for every definition and endpoint. This ledger MUST live below `~/.agents/.git`, MUST be keyed by physical scope path and provider endpoint, and MUST NOT add state files to a project repository. The ledger is private synchronization metadata, not canonical skill or agent content. Its file layout and JSON representation are implementation details, not a public schema, version, or migration mechanism.
 
 Every definition record MUST have one aggregate state with precedence `invalid`, `conflict`, `changed`, `missing`, then `synced`.
 
@@ -183,7 +183,7 @@ Within one scope, reconciliation MUST follow these rules:
 
 When no baseline exists, content present on exactly one side is a new definition, identical content on multiple sides establishes the initial baseline, and differing content on multiple sides is a conflict. Overlord MUST NOT use modification times to choose a winner.
 
-For skills, the complete directory tree is the synchronized value. A Claude-created skill MUST be copied into the same scope's `.agents/skills`; a canonical skill MUST be materialized for Claude; Codex reads the canonical tree directly.
+For skills, the complete Git-representable file tree is the synchronized value. A Claude-created skill MUST be copied into the same scope's `.agents/skills`; a canonical skill MUST be materialized for Claude; Codex reads the canonical tree directly.
 
 For agents, a provider-created or provider-edited definition MUST be converted to canonical Markdown while retaining the corresponding provider overlay, then rendered to the other enabled target. Independently changed native agents with incompatible common fields MUST conflict.
 
@@ -212,17 +212,19 @@ overlord check
 overlord sync
 ```
 
-`init` MUST initialize the user canonical directories, initialize `~/.agents` as a Git repository when needed, create a minimal `roots: []` configuration when absent, install the bundled Overlord skill when absent, create the synchronization ledger, and commit the initial managed state with a deterministic message. It MUST NOT implement a general configuration upgrade or migration flow.
+`init` MUST create the user canonical root when needed and create or validate a dedicated physical Git repository rooted exactly there. It MUST reject unsupported `.git` files or symlinks and repositories whose work-tree top level is elsewhere. It MUST create a minimal `roots: []` configuration when absent, install the bundled Overlord skill when absent, commit the initial managed canonical state with the fixed subject `overlord: initialize`, and initialize the private synchronization ledger below `.git`. A repeated no-op `init` MUST NOT create another commit.
 
-`status` MUST discover and inspect the complete fleet without mutation and MUST report attention while still exiting successfully after a completed inspection.
+`status`, `check`, and `sync` MUST require an existing dedicated user repository. `init` is the normal way to establish it, but a valid manually initialized repository, including an unborn repository, is accepted without a hidden initialization marker. Before fleet discovery the commands MUST validate the repository without creating the canonical root, `.git`, a commit, or ledger state. An absent or invalid repository MUST fail as a top-level permission error.
 
-`check` MUST perform the same fleet inspection and MUST fail its assertion when attention is required.
+`status` MUST discover and inspect the complete fleet without mutation and MUST report attention while still exiting successfully after a completed inspection. It MUST NOT stage or commit files or create or update ledger state.
+
+`check` MUST perform the same read-only fleet inspection and MUST fail its assertion when attention is required.
 
 `sync` MUST discover the complete fleet, reconcile each scope sequentially, continue after a scope-local failure, and report the final inventory plus completed and still-planned actions.
 
-If reconciliation changes canonical content in the user scope, `sync` MUST stage only Overlord-managed paths in `~/.agents`, create exactly one commit with a deterministic message, and report the commit SHA, originating endpoint, and changed canonical paths using fixed program output. An LLM MUST NOT compose the message or select staged files. A no-op sync MUST NOT create a commit, and Overlord MUST NOT push.
+For the user scope, `sync` MUST apply every safe canonical write and deletion for the invocation before provider propagation, stage the changed fleet configuration plus the Overlord-managed canonical paths selected by safe reconciliation, and create at most one commit with the fixed subject `overlord: synchronize`. It MUST then report the commit SHA, sorted originating endpoints when applicable, and committed canonical files using fixed program output. An LLM MUST NOT compose the message or select staged files. Other staged and working-tree changes MUST remain excluded and preserved. A clean/no-op sync MUST NOT create a commit, and Overlord MUST NOT push.
 
-If the user commit fails, `sync` MUST stop before distributing those uncommitted canonical changes to provider endpoints. Project canonical changes MUST be reconciled without invoking Git in the project repository.
+User provider propagation MUST begin only after that commit succeeds or Git establishes that the selected canonical paths are already clean. If the user commit fails, `sync` MUST stop before distributing those uncommitted canonical changes or advancing their ledger receipts; the canonical working-tree changes MUST remain visible for diagnosis and retry. Project canonical changes MUST be reconciled without invoking Git in the project repository, regardless of whether a project repository exists.
 
 The only operational output option is `--json`; `--help` and `--version` are informational, and a command is required.
 
@@ -279,7 +281,7 @@ Built-in, organization-managed, plugin-provided, marketplace, and session-only d
 
 Claude commands, MCP settings, rules, hooks, `CLAUDE.md`, and `AGENTS.md` are not synchronized.
 
-Overlord runs Git only for its user source at `~/.agents`. It MUST NOT commit generated provider files, alter project ignore rules, commit or push project repositories, push the user repository, or guarantee that an already running provider session reloads changed artifacts.
+Overlord runs Git only for its user source at `~/.agents`. It MUST NOT commit generated provider files, alter project ignore rules, inspect or otherwise invoke Git in project repositories, push the user repository, or guarantee that an already running provider session reloads changed artifacts.
 
 The implementation targets macOS and Linux with Node.js 22 or newer; Windows path semantics are not part of this version's contract.
 
@@ -293,6 +295,6 @@ The implementation targets macOS and Linux with Node.js 22 or newer; Windows pat
 1. Invalid canonical-backed state blocks only its scope, while conflicts and provider-only invalid state do not block unrelated safe work.
 1. A tracked single-sided deletion propagates within its scope, modification-versus-deletion conflicts remain untouched, and an untracked absence is materialized rather than treated as deletion.
 1. User and project definitions with the same name remain independent and are distinguishable by absolute `scopePath` in human and JSON reports.
-1. `~/.agents` is initialized and maintained as Overlord's only Git repository; user canonical changes receive one deterministic commit and static report, while project repositories receive no Git operations.
+1. `init` creates or validates `~/.agents` as Overlord's only dedicated Git repository and records managed source in an initial fixed-message commit; a missing user repository makes inspection fail without mutation, user-source changes are committed once before provider propagation, and project repositories receive no Git operations.
 1. `status`, `check`, `sync`, and `init` obey their documented exit behavior, and JSON output validates against schema version 2.
 1. Concurrent mutation of one scope is serialized, sibling scope failures are isolated, every file write is atomic, an interrupted skill copy leaves a reported partial tree rather than a corrupted or silently discarded one, and every symlink in a managed path is refused.

@@ -2,6 +2,7 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
 
 import { parseFrontmatter } from "./frontmatter.js";
+import { reservedSkillArtifact } from "./filesystem.js";
 import type {
   CanonicalAgent,
   CanonicalScope,
@@ -142,6 +143,17 @@ async function validateSkillTree(
         continue;
       }
       if (ignoredArtifact(entry.name)) continue;
+      if (reservedSkillArtifact(entry.name)) {
+        valid = false;
+        diagnostic(
+          diagnostics,
+          "error",
+          "unsupported-skill-git-metadata",
+          `Skill contains nested Git metadata '${relativePath}'; nested repositories are not supported.`,
+          absolutePath,
+        );
+        continue;
+      }
 
       if (entry.isDirectory()) {
         await walk(absolutePath);

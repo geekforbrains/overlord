@@ -5,7 +5,7 @@ import { parse as parseToml } from "smol-toml";
 
 import { initialize, synchronize } from "../src/engine.js";
 import { acquireScopeLock } from "../src/filesystem.js";
-import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
+import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 import type { EngineOptions } from "../src/types.js";
 
 afterEach(cleanupTemporaryDirectories);
@@ -45,6 +45,7 @@ async function fixture() {
     join(home, ".agents/overlord/overlord.yaml"),
     `roots:\n  - ${discoveryRoot}\n`,
   );
+  await prepareUserRepository(home);
   return { home, discoveryRoot, options };
 }
 

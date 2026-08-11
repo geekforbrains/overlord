@@ -2,6 +2,8 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { ensureUserRepository } from "../src/git.js";
+
 const temporaryDirectories: string[] = [];
 
 export async function temporaryDirectory(prefix = "overlord-test-"): Promise<string> {
@@ -17,6 +19,10 @@ export async function cleanupTemporaryDirectories(): Promise<void> {
 export async function writeText(path: string, contents: string, mode?: number): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, contents, mode === undefined ? undefined : { mode });
+}
+
+export async function prepareUserRepository(home: string): Promise<void> {
+  await ensureUserRepository(join(home, ".agents"));
 }
 
 export const validSkill = `---

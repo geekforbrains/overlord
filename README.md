@@ -15,7 +15,9 @@ roots:
   - /Volumes/work/clients
 ```
 
-Run `overlord init` once to create the user source, initialize `~/.agents` as Overlord's Git repository, create an empty `roots` configuration, install the bundled Overlord workflow skill, and record the initial state. Then edit the configuration to add the parent directories you trust. The configuration has no version or automatic migration mechanism; a breaking change is documented when one is introduced.
+Use `overlord init` as the normal first command. It creates the user source, creates or validates a dedicated physical Git repository at `~/.agents`, writes an empty `roots` configuration when needed, installs the bundled Overlord workflow skill, and records the managed source in an initial `overlord: initialize` commit. Repeating `init` validates the repository and creates no commit when the managed files are unchanged. Then edit the configuration to add the parent directories you trust.
+
+The configuration is deliberately just `roots`; it has no version field or automatic migration flow.
 
 A configured root is both a discovery boundary and a project candidate. If the root itself contains supported definitions, it is synchronized as a project; otherwise only matching descendants become project scopes. Definitions are never hoisted between a root and its descendants.
 
@@ -45,6 +47,8 @@ overlord check
 
 You can run those commands from anywhere on the machine.
 
+All three commands require an existing dedicated Git repository at `~/.agents`; `overlord init` normally establishes it. A valid manually initialized repository, including one without a first commit, is also accepted. `status` and `check` only validate the repository and inspect the fleet; they never create a repository, initialize synchronization metadata, stage files, or commit. A home without that repository is an error rather than an implicit initialization.
+
 ## Canonical sources and provider outputs
 
 User definitions live below `~/.agents`; every discovered project keeps its definitions below that project's `.agents` directory. The scope-local `.agents` tree is the durable source after every successful synchronization:
@@ -64,6 +68,8 @@ User definitions live below `~/.agents`; every discovered project keeps its defi
 ```
 
 Skills use the [Agent Skills](https://agentskills.io/specification) directory format. Codex reads `.agents/skills` directly, while Overlord copies each canonical skill to a physical directory in Claude's skill location.
+
+The synchronized skill value is its file paths, file bytes, and executable bits—the same information Git can preserve. Empty directories, directory permissions, and other non-executable permission differences are not treated as skill changes. A nested `.git` entry, including a case variant, is invalid because the owning source repository cannot preserve it as ordinary skill files.
 
 Canonical agents are portable Markdown definitions. Overlord renders each enabled agent to Claude Markdown and Codex TOML while preserving provider-specific fields under its target overlay.
 
@@ -97,13 +103,13 @@ Overlord reconciles these filesystem locations directly. It does not detect, inv
 
 This is the only supported layout. Intentional edits should normally be made in `.agents`, but provider-native files are tracked synchronization endpoints because Claude or Codex may create, modify, or delete them while helping the user. Overlord incorporates an unambiguous native change into the same scope's `.agents` source before updating its other endpoints. Managed artifact roots, definition directories, files, and skill payload entries must be physical filesystem objects; Overlord does not follow or preserve symlinks in managed paths.
 
-The user source at `~/.agents` is the only Git repository Overlord owns. Overlord never initializes, stages, commits, or otherwise maintains a discovered project's Git repository. A project-side import may therefore leave ordinary `.agents` working-tree changes for that project to manage itself.
+The user source at `~/.agents` is the only Git repository Overlord owns. Its `.git` entry must be a physical directory whose work-tree top level is exactly `~/.agents`; Git worktree files, symlinked metadata, and repositories pointed at another work tree are rejected. Overlord never initializes, stages, commits, changes ignore rules in, pushes, or otherwise maintains a discovered project's Git repository. A project-side import may therefore leave ordinary `.agents` working-tree changes for that project to manage itself.
 
 User-level `CLAUDE_CONFIG_DIR` and `CODEX_HOME` overrides are rejected when their physical paths would overlap a canonical or project artifact root, including through a symlink or filesystem case alias. This prevents one scope from importing, overwriting, or removing another scope's files.
 
 ## Synchronization behavior
 
-Overlord records the last successfully synchronized content for every definition and endpoint in a machine-local ledger below `~/.agents/.git`. On the next `sync`, it compares the current canonical and native content with that baseline:
+Overlord records the last successfully synchronized content for every definition and endpoint in machine-local ledger files below `~/.agents/.git`. On the next `sync`, it compares the current canonical and native content with that baseline:
 
 - When only canonical content changed, Overlord updates that scope's provider outputs.
 - When only one provider endpoint changed, Overlord incorporates the change into that scope's canonical definition and updates its other endpoints.
@@ -115,7 +121,9 @@ Overlord records the last successfully synchronized content for every definition
 
 The same name may have unrelated content in the user scope and multiple projects. A change to `~/Projects/A/.claude/skills/foo` can update only `~/Projects/A/.agents/skills/foo`; it never changes `~/.agents/skills/foo` or Project B.
 
-When a successful sync changes user canonical content, Overlord stages only the files it manages in `~/.agents` and creates one commit with a deterministic message. It reports the commit SHA, the originating endpoint, and every changed canonical path using fixed output; no LLM composes the commit or selects files. Overlord creates no commit for a no-op sync and never pushes. If the commit fails, provider propagation stops. Project scopes use the same change ledger but receive no automatic Git operations.
+The ledger is private synchronization metadata. It is not canonical content, is never written into a project, and has no public schema, version, or migration contract. `status` and `check` read it without creating or updating it.
+
+During `sync`, Overlord applies all safe user-canonical changes first, stages the changed fleet configuration and canonical paths selected by reconciliation, and creates at most one `overlord: synchronize` commit before changing any user provider output. Fixed output reports the commit SHA, any originating endpoints, and every committed canonical file; no LLM composes the message or selects files. Other staged or working-tree content is excluded and preserved. A clean/no-op sync creates no commit, and Overlord never pushes. If the user commit fails, provider propagation and ledger advancement for those changes stop, leaving the canonical changes visible for diagnosis and retry. Project scopes use the same machine-local ledger but receive no Git operations.
 
 Mutations use per-scope locks. Individual files are published atomically, so a half-written agent file never appears at its destination. A skill directory is validated and staged first, but its entries are published one at a time, so a failure partway through leaves a partial skill directory in place and reports the paths it created as a completed action. Overlord does not delete entries it did not create, and it does not guarantee that a provider never sees a partially materialized skill.
 
@@ -123,10 +131,10 @@ Mutations use per-scope locks. Individual files are published atomically, so a h
 
 | Command           | Behavior                                                                                                                                   |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `overlord init`   | Initialize the user source, user Git repository, fleet configuration, bundled workflow skill, and initial synchronization state.         |
-| `overlord status` | Discover every scope and report definitions, diagnostics, and proposed actions; inspection issues do not change its exit code from 0.     |
-| `overlord check`  | Inspect the same fleet and exit 1 when any scope contains unresolved or invalid state or an error diagnostic.                           |
-| `overlord sync`   | Reconcile unambiguous additions, edits, and deletions within each scope, commit user-source changes, and report unresolved conflicts.     |
+| `overlord init`   | Create or validate the dedicated user repository, initialize managed files and private ledger state, and make the initial managed commit. |
+| `overlord status` | Require the user repository, inspect without mutation, and report definitions, diagnostics, and proposed actions; attention still exits 0. |
+| `overlord check`  | Require the user repository, perform the same read-only inspection, and exit 1 when attention is required.                              |
+| `overlord sync`   | Require the user repository, reconcile safe changes, commit user-source changes before provider propagation, and report conflicts.       |
 
 Commands accept `--json` for one schema-versioned JSON document on stdout. Help and installed-version output are available through `--help` and `--version`.
 
