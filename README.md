@@ -109,7 +109,7 @@ User-level `CLAUDE_CONFIG_DIR` and `CODEX_HOME` overrides are rejected when thei
 
 - A valid canonical definition with a missing provider output is materialized automatically.
 - A valid, unambiguous provider-native definition with no canonical source is treated as migration input, adopted into that same scope, and replicated to the other provider automatically.
-- A redundant Codex scan-only skill is backed up and removed after its canonical adoption so Codex does not load two copies.
+- A redundant Codex scan-only skill is backed up and removed after its canonical adoption, leaving one source of truth. Current Codex releases do not scan `.codex/skills`, so this is cleanup of a stale copy rather than a fix for a double load.
 - A conflict or invalid definition is reported and left untouched; other independent scopes continue synchronizing.
 - A failed scope is reported without hoisting its definitions or blocking healthy sibling scopes.
 
@@ -117,7 +117,9 @@ Overlord never guesses which side of a conflict should win. Resolve the underlyi
 
 Deleting a canonical definition does not propagate deletion to provider directories. A remaining valid native copy becomes stale migration input and can be adopted again on a later sync, so permanent deletion requires removing every generated copy too.
 
-Mutations use per-scope locks and staged or atomic writes where supported. Before a verified replacement or removal, Overlord atomically moves the displaced artifact into a fresh UUID directory under the adjacent provider control directory's physical `.overlord-backups` folder, such as `.codex/.overlord-backups/<uuid>/`; it refuses a symlinked or non-directory backup root and reports the exact backup path in human and JSON actions.
+Mutations use per-scope locks. Individual files are published atomically, so a half-written agent file never appears at its destination. A skill directory is validated and staged first, but its entries are published one at a time, so a failure partway through leaves a partial skill directory in place and reports the paths it created as a completed action. Overlord does not delete entries it did not create, and it does not guarantee that a provider never sees a partially materialized skill.
+
+Before a verified replacement or removal, Overlord atomically moves the displaced artifact into a fresh UUID directory under the adjacent provider control directory's physical `.overlord-backups` folder, such as `.codex/.overlord-backups/<uuid>/`; it refuses a symlinked or non-directory backup root and reports the exact backup path in human and JSON actions.
 
 ## Commands
 

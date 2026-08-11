@@ -41,7 +41,7 @@ The user scope MUST always be first and MUST use the resolved absolute home dire
 
 Each configured root is a discovery boundary, never a project scope itself, and Overlord MUST inspect its proper descendants recursively.
 
-A descendant is a project scope when at least one of these artifact directories exists as a physical directory and contains at least one entry:
+A descendant is a project scope when at least one of these artifact paths exists:
 
 - `.agents/skills`
 - `.agents/overlord/agents`
@@ -49,6 +49,8 @@ A descendant is a project scope when at least one of these artifact directories 
 - `.claude/agents`
 - `.codex/skills`
 - `.codex/agents`
+
+A physical directory marks a scope only when it contains at least one entry. A symlink or non-directory in an artifact path also marks a scope, and MUST NOT be traversed or followed; discovery records the scope so the unsupported artifact root is reported as an error rather than silently omitting the project. Such a scope is inventoried, produces error diagnostics, and is blocked from mutation under section 13.
 
 The project scope path is that descendant and its canonical path is `<project>/.agents`; definitions found below it MUST remain in that scope and MUST NOT be hoisted to a configured root or sibling.
 
@@ -98,7 +100,7 @@ User-native locations default to `~/.claude/{skills,agents}` and `~/.codex/{skil
 
 Provider override paths MUST NOT physically overlap canonical or native artifact roots in the user scope or any discovered project scope. Overlap through symlinks, filesystem aliases, or case-equivalent paths MUST produce error diagnostics and MUST block mutation in every affected scope.
 
-Codex reads canonical skills directly from `<scope>/.agents/skills`; `.codex/skills` is a physical scan-only migration location and MUST NOT be the steady-state output for a managed skill.
+Codex reads canonical skills directly from `<scope>/.agents/skills`, so Overlord MUST NOT generate a Codex skill output. `.codex/skills` is not a location current Codex releases scan; Overlord treats it as a physical scan-only migration location for skills placed there by earlier tooling, and it MUST NOT be the steady-state output for a managed skill.
 
 Claude skills MUST be materialized as physical directories under `.claude/skills`; canonical agents MUST be deterministically rendered as physical files in both enabled native agent locations.
 
@@ -165,7 +167,7 @@ Fleet status MUST be `attention-required` when any definition is missing, unadop
 
 An invalid record attached to canonical content MUST block all mutations in that scope after preflight, while an invalid native-only record MUST remain untouched without blocking unrelated valid definitions in that scope.
 
-Conflicts MUST remain untouched and MUST NOT block safe work for other definitions in the same scope.
+Conflicts MUST remain untouched and MUST NOT block safe work for other definitions in the same scope. Isolation is per output, not per definition: a conflicting output MUST NOT prevent another target of the same definition from being materialized when that target is otherwise safe.
 
 ## 8. Deterministic synchronization union
 
@@ -257,7 +259,9 @@ Each mutating scope MUST use a per-scope lock derived from its physical path; st
 
 Every mutating scope MUST be inventoried before locking and again while locked so pre-lock observations never authorize stale writes.
 
-Additive file writes and directory copies MUST refuse to replace a path that appeared after inventory and MUST be staged and atomically published where supported; intentional replacement and removal MUST retain recoverable backups.
+Additive file writes and directory copies MUST refuse to replace a path that appeared after inventory; intentional replacement and removal MUST retain recoverable backups.
+
+A single file MUST be published atomically, so a partially written file is never observable at its destination. A directory copy is validated and staged first, but its entries are published individually into the destination, so publication of a skill tree as a whole is not atomic. A failure partway through MUST leave the partial tree in place rather than deleting entries it did not create, and MUST report the created paths as a completed action so the incomplete output is recoverable and visible. Version 0.2 does not guarantee that a provider never observes a partially materialized skill directory.
 
 Recoverable backups MUST be created by atomically moving each displaced artifact into a fresh UUID directory below the physical `.overlord-backups` directory adjacent to its provider artifact root, such as `.codex/.overlord-backups/<uuid>/<name>`. A symlinked or non-directory backup container MUST block the displacement, and each completed action MUST report the exact backup path.
 
@@ -283,11 +287,11 @@ The implementation targets macOS and Linux with Node.js 22 or newer; Windows pat
 
 1. Running the same command from unrelated working directories discovers the same configured fleet and produces the same ordered scope set for unchanged filesystem state.
 1. User definitions synchronize to user-native locations, and every discovered project's definitions synchronize only within that project.
-1. Recursive discovery finds canonical-only and provider-native-only projects, preserves nested scope isolation, ignores pruned trees and symlinked directories, and reports inaccessible roots without stopping healthy scopes.
+1. Recursive discovery finds canonical-only and provider-native-only projects, preserves nested scope isolation, ignores pruned trees, never traverses a symlinked directory, still records a scope whose artifact root is a symlink so it is reported rather than omitted, and reports inaccessible roots without stopping healthy scopes.
 1. A valid canonical skill materializes as a physical Claude directory while Codex reads canonical source directly, and a valid canonical agent deterministically renders as a physical file for each enabled target.
 1. Valid unambiguous native-only definitions are adopted and replicated automatically, identical dual-provider sources are unioned, and ambiguous or differing sources remain untouched conflicts.
 1. Invalid canonical-backed state blocks only its scope, while conflicts and native-only invalid state do not block unrelated safe work.
 1. Redundant scan-only or adoption duplicate removal is verified, backed up, and idempotent, while general canonical deletion does not propagate.
 1. User and project definitions with the same name remain independent and are distinguishable by absolute `scopePath` in human and JSON reports.
 1. `status`, `check`, `sync`, and `init` obey their documented exit behavior, and JSON output validates against schema version 2.
-1. Concurrent mutation of one scope is serialized, sibling scope failures are isolated, writes are atomic where supported, and every symlink in a managed path is refused.
+1. Concurrent mutation of one scope is serialized, sibling scope failures are isolated, every file write is atomic, an interrupted skill copy leaves a reported partial tree rather than a corrupted or silently discarded one, and every symlink in a managed path is refused.
