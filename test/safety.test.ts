@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmod, lstat, mkdir, readFile, readdir, readlink, realpath, stat, symlink, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readlink, realpath, stat, symlink, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import { initialize, inspect, synchronize } from "../src/engine.js";
@@ -27,7 +27,7 @@ async function fleetFixture() {
   };
   await writeText(
     join(home, ".agents/overlord/overlord.yaml"),
-    `version: 2\nroots:\n  - ${fleetRoot}\n`,
+    `roots:\n  - ${fleetRoot}\n`,
   );
   return { home, fleetRoot, options };
 }
@@ -362,22 +362,6 @@ describe("fleet safety contracts", () => {
     expect(await readFile(join(outside, "verify-build/SKILL.md"), "utf8")).toBe(validSkill);
   });
 
-  it("refuses scan-only adoption through a symlinked native root", async () => {
-    const { home, fleetRoot, options } = await fleetFixture();
-    const project = join(fleetRoot, "project");
-    const outside = join(home, "outside-codex-skills");
-    await writeText(join(project, ".agents/skills/anchor/SKILL.md"), namedSkill("anchor"));
-    await writeText(join(outside, "verify-build/SKILL.md"), validSkill);
-    await mkdir(join(project, ".codex"), { recursive: true });
-    await symlink(outside, join(project, ".codex/skills"));
-
-    const result = await synchronize(options);
-
-    expect(scopeDiagnostic(result, project)).toMatchObject({ code: "permission-denied" });
-    await expect(lstat(join(project, ".agents/skills/verify-build"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readFile(join(outside, "verify-build/SKILL.md"), "utf8")).toBe(validSkill);
-  });
-
   it("rejects and preserves an internal canonical skill symlink", async () => {
     const { fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
@@ -464,27 +448,6 @@ describe("fleet safety contracts", () => {
       await chmod(lockedDirectory, 0o755);
       await chmod(nativeDirectory, 0o755).catch(() => undefined);
     }
-  });
-
-  it("fully validates a native skill before adopting or removing it", async () => {
-    const { fleetRoot, options } = await fleetFixture();
-    const project = join(fleetRoot, "project");
-    const native = join(project, ".codex/skills/verify-build");
-    const dangling = join(native, "references/missing.md");
-    await writeText(join(native, "SKILL.md"), validSkill);
-    await mkdir(join(native, "references"), { recursive: true });
-    await symlink("not-there.md", dangling);
-
-    const result = await synchronize(options);
-
-    expect(result.definitions).toContainEqual(expect.objectContaining({
-      name: "verify-build",
-      scopePath: project,
-      state: "invalid",
-    }));
-    await expect(lstat(join(project, ".agents/skills/verify-build"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await readlink(dangling)).toBe("not-there.md");
-    expect(result.actions?.some((action) => action.removes?.includes(native))).toBe(false);
   });
 
   it("rejects and preserves an internal native skill symlink even when it stays inside the skill", async () => {
@@ -598,66 +561,6 @@ describe("fleet safety contracts", () => {
     expect(await readlink(native)).toBe(outside);
   });
 
-  it("reports recoverable backup metadata for a scan-only adoption move", async () => {
-    const { fleetRoot, options } = await fleetFixture();
-    const project = join(fleetRoot, "project");
-    const native = join(project, ".codex/skills/verify-build");
-    await writeText(join(native, "SKILL.md"), validSkill);
-
-    const result = await synchronize(options);
-    const move = result.actions?.find((action) => action.removes?.includes(native));
-    const backup = move?.backups?.[0];
-
-    expect(move).toMatchObject({ scopePath: project, removes: [native] });
-    expect(backup).toBeTypeOf("string");
-    expect(await readFile(join(backup!, "SKILL.md"), "utf8")).toBe(validSkill);
-    await expect(lstat(native)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("refuses to move a backup through a symlinked backup root", async () => {
-    const { home, fleetRoot, options } = await fleetFixture();
-    const project = join(fleetRoot, "project");
-    const canonical = join(project, ".agents/skills/verify-build");
-    const claude = join(project, ".claude/skills/verify-build");
-    const duplicate = join(project, ".codex/skills/verify-build");
-    const outside = join(home, "outside-backups");
-    await writeText(join(canonical, "SKILL.md"), validSkill);
-    await writeText(join(claude, "SKILL.md"), validSkill);
-    await writeText(join(duplicate, "SKILL.md"), validSkill);
-    await mkdir(outside);
-    await symlink(outside, join(project, ".codex/.overlord-backups"));
-
-    const result = await synchronize(options);
-
-    expect(scopeDiagnostic(result, project)).toMatchObject({ code: "permission-denied" });
-    expect(await readFile(join(duplicate, "SKILL.md"), "utf8")).toBe(validSkill);
-    expect(await readdir(outside)).toEqual([]);
-  });
-
-  it("reports a completed canonical install when scan-only displacement fails", async () => {
-    const { fleetRoot, options } = await fleetFixture();
-    const project = join(fleetRoot, "project");
-    const nativeRoot = join(project, ".codex/skills");
-    const native = join(nativeRoot, "verify-build");
-    const canonical = join(project, ".agents/skills/verify-build");
-    await writeText(join(native, "SKILL.md"), validSkill);
-    await chmod(nativeRoot, 0o555);
-
-    let result: Awaited<ReturnType<typeof synchronize>>;
-    try {
-      result = await synchronize(options);
-    } finally {
-      await chmod(nativeRoot, 0o755);
-    }
-    const scopedActions = result.actions?.filter((action) => action.scopePath === project) ?? [];
-
-    expect(scopeDiagnostic(result, project)).toBeDefined();
-    expect(await readFile(join(canonical, "SKILL.md"), "utf8")).toBe(validSkill);
-    expect(await readFile(join(native, "SKILL.md"), "utf8")).toBe(validSkill);
-    expect(scopedActions.some((action) => action.writes?.includes(canonical))).toBe(true);
-    expect(scopedActions.flatMap((action) => action.backups ?? [])).toEqual([]);
-  });
-
   it("preserves an adopted native agent when atomic displacement fails", async () => {
     const { fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
@@ -732,7 +635,7 @@ describe("fleet safety contracts", () => {
       home,
       env: { CLAUDE_CONFIG_DIR: join(home, ".claude"), CODEX_HOME: join(home, ".agents") },
     };
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
 
     const result = await synchronize(options);
@@ -754,7 +657,7 @@ describe("fleet safety contracts", () => {
       home,
       env: { CLAUDE_CONFIG_DIR: join(home, ".claude"), CODEX_HOME: codexAlias },
     };
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
     await symlink(join(home, ".agents"), codexAlias);
 
@@ -775,7 +678,7 @@ describe("fleet safety contracts", () => {
       home,
       env: { CLAUDE_CONFIG_DIR: join(home, ".claude"), CODEX_HOME: caseAlias },
     };
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
     const pathsAlias = await realpath(caseAlias).then(() => true, () => false);
 
@@ -794,7 +697,7 @@ describe("fleet safety contracts", () => {
       home,
       env: { CLAUDE_CONFIG_DIR: claudeRoot, CODEX_HOME: join(home, ".provider") },
     };
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(canonical, "SKILL.md"), namedSkill("critical"));
 
     const result = await synchronize(options);

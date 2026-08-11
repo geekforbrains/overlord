@@ -1404,7 +1404,7 @@ export async function initialize(options: EngineOptions): Promise<OutputDocument
     }
     if (!(await pathExists(configuration))) {
       try {
-        await writeFileAtomicExclusive(configuration, renderConfig({ version: 2, roots: [] }));
+        await writeFileAtomicExclusive(configuration, renderConfig({ roots: [] }));
         actions.push(initAction(scope, "initialize-config", "Created fleet discovery configuration.", [configuration]));
       } catch (error) {
         if (errorCode(error) !== "EEXIST") throw error;

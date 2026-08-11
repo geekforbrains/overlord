@@ -41,7 +41,6 @@ describe("scope discovery", () => {
       join(root, "group/bravo"),
       join(root, "group/charlie"),
       join(root, "other/delta"),
-      join(root, "other/echo"),
       join(root, "other/foxtrot"),
     ];
 
@@ -49,8 +48,7 @@ describe("scope discovery", () => {
     await writeText(join(projects[1]!, ".agents/overlord/agents/reviewer.md"), validAgent);
     await writeText(join(projects[2]!, ".claude/skills/verify-build/SKILL.md"), validSkill);
     await writeText(join(projects[3]!, ".claude/agents/team/reviewer.md"), "native claude agent\n");
-    await writeText(join(projects[4]!, ".codex/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(join(projects[5]!, ".codex/agents/reviewer.toml"), "name = \"reviewer\"\n");
+    await writeText(join(projects[4]!, ".codex/agents/reviewer.toml"), "name = \"reviewer\"\n");
 
     const result = await discoverScopes({ home, roots: [root] });
 
@@ -64,7 +62,7 @@ describe("scope discovery", () => {
     })));
   });
 
-  it("uses a configured root only as a boundary and never hoists a child scope", async () => {
+  it("treats a configured root as a project candidate without hoisting children", async () => {
     const home = await temporaryDirectory();
     const root = join(home, "Projects");
     const organization = join(root, "organization");
@@ -74,11 +72,27 @@ describe("scope discovery", () => {
 
     const result = await discoverScopes({ home, roots: [root] });
 
-    expect(scopePaths(result.scopes)).toEqual([home, project]);
-    expect(result.scopes).not.toContainEqual(expect.objectContaining({ path: root }));
+    expect(scopePaths(result.scopes)).toEqual([home, root, project]);
+    expect(result.scopes).toContainEqual(expect.objectContaining({
+      type: "project",
+      path: root,
+      canonical: join(root, ".agents"),
+      discoveryRoot: root,
+    }));
     expect(result.scopes).not.toContainEqual(expect.objectContaining({ path: organization }));
-    expect(result.scopes[1]).toMatchObject({ canonical: join(project, ".agents") });
+    expect(result.scopes[2]).toMatchObject({ canonical: join(project, ".agents") });
     expect(result.physicalPaths.get(project)).toBe(await realpath(project));
+  });
+
+  it("does not discover a project from .codex/skills alone", async () => {
+    const home = await temporaryDirectory();
+    const root = join(home, "Projects");
+    await writeText(join(root, "ignored/.codex/skills/verify-build/SKILL.md"), validSkill);
+
+    const result = await discoverScopes({ home, roots: [root] });
+
+    expect(scopePaths(result.scopes)).toEqual([home]);
+    expect(result.diagnostics).toEqual([]);
   });
 
   it("keeps sibling and nested scopes isolated and deduplicates overlapping roots", async () => {

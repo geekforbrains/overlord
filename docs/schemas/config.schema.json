@@ -2,18 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/geekforbrains/overlord/main/docs/schemas/config.schema.json",
   "title": "overlord.yaml",
-  "description": "User-level configuration for recursive Overlord project discovery.",
+  "description": "User-level configuration for recursive Overlord project discovery at and below configured roots.",
   "type": "object",
-  "required": ["version"],
+  "required": ["roots"],
   "additionalProperties": false,
   "properties": {
-    "version": {
-      "const": 2,
-      "description": "Configuration schema version."
-    },
     "roots": {
       "type": "array",
-      "description": "Absolute or home-relative parent directories searched recursively for independent project scopes.",
+      "description": "Absolute or home-relative directories considered as projects and searched recursively for independent nested project scopes.",
       "items": {
         "type": "string",
         "minLength": 1,

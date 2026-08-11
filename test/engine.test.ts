@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, readlink, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 
-import { initialize, inspect, synchronize } from "../src/engine.js";
+import { initialize, synchronize } from "../src/engine.js";
 import { acquireScopeLock } from "../src/filesystem.js";
 import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 import type { EngineOptions } from "../src/types.js";
@@ -43,7 +43,7 @@ async function fixture() {
   };
   await writeText(
     join(home, ".agents/overlord/overlord.yaml"),
-    `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+    `roots:\n  - ${discoveryRoot}\n`,
   );
   return { home, discoveryRoot, options };
 }
@@ -56,7 +56,7 @@ describe("fleet inventory and synchronization", () => {
     const first = await initialize(options);
 
     expect(first.status).toBe("ok");
-    expect(await readFile(join(home, ".agents/overlord/overlord.yaml"), "utf8")).toBe("version: 2\nroots: []\n");
+    expect(await readFile(join(home, ".agents/overlord/overlord.yaml"), "utf8")).toBe("roots: []\n");
     expect(await readFile(join(home, ".agents/skills/overlord/SKILL.md"), "utf8")).toContain("name: overlord");
 
     const second = await initialize(options);
@@ -67,7 +67,7 @@ describe("fleet inventory and synchronization", () => {
   it("reports only init work completed before a later failure", async () => {
     const home = await temporaryDirectory();
     const options: EngineOptions = { home, env: {} };
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 2\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\n");
     await writeText(join(home, ".agents/overlord/agents"), "blocks the agents directory\n");
 
     let failure: unknown;
@@ -255,25 +255,6 @@ describe("fleet inventory and synchronization", () => {
     }));
   });
 
-  it("migrates a unique Codex scan-only skill and retains a recoverable backup", async () => {
-    const { discoveryRoot, options } = await fixture();
-    const project = join(discoveryRoot, "codex-native");
-    const native = join(project, ".codex/skills/verify-build");
-    const canonical = join(project, ".agents/skills/verify-build");
-    const claude = join(project, ".claude/skills/verify-build");
-    await writeText(join(native, "SKILL.md"), validSkill);
-
-    const result = await synchronize(options);
-
-    expect(result.status).toBe("ok");
-    expect(await readFile(join(canonical, "SKILL.md"), "utf8")).toBe(validSkill);
-    expect(await readFile(join(claude, "SKILL.md"), "utf8")).toBe(validSkill);
-    await expect(lstat(native)).rejects.toMatchObject({ code: "ENOENT" });
-    const backup = result.actions?.flatMap((action) => action.backups ?? [])[0];
-    expect(backup).toBeTruthy();
-    expect(await readFile(join(backup!, "SKILL.md"), "utf8")).toBe(validSkill);
-  });
-
   it("automatically adopts a native agent while preserving its provider overlay", async () => {
     const { discoveryRoot, options } = await fixture();
     const project = join(discoveryRoot, "native-agent");
@@ -296,48 +277,6 @@ Review carefully.
     expect(canonical).toContain("color: blue");
     expect(canonical).toContain("codex: {}");
     expect(await readFile(join(project, ".codex/agents/reviewer.toml"), "utf8")).toContain('name = "reviewer"');
-  });
-
-  it("deduplicates identical Claude and Codex native skills through canonical source", async () => {
-    const { discoveryRoot, options } = await fixture();
-    const project = join(discoveryRoot, "dual-native");
-    const claude = join(project, ".claude/skills/verify-build");
-    const codex = join(project, ".codex/skills/verify-build");
-    await writeText(join(claude, "SKILL.md"), validSkill);
-    await writeText(join(codex, "SKILL.md"), validSkill);
-
-    const result = await synchronize(options);
-
-    expect(result.status).toBe("ok");
-    expect(await readFile(join(project, ".agents/skills/verify-build/SKILL.md"), "utf8")).toBe(validSkill);
-    expect(await readFile(join(claude, "SKILL.md"), "utf8")).toBe(validSkill);
-    await expect(lstat(codex)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(result.actions?.some((action) => action.removes?.includes(codex) && (action.backups?.length ?? 0) > 0)).toBe(true);
-  });
-
-  it("removes an identical Codex scan-only duplicate and ignores .system skills", async () => {
-    const { discoveryRoot, options } = await fixture();
-    const project = join(discoveryRoot, "scan-only-duplicate");
-    const duplicate = join(project, ".codex/skills/verify-build");
-    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(join(duplicate, "SKILL.md"), validSkill);
-    const systemDirectory = process.platform === "darwin" ? ".SYSTEM" : ".system";
-    await writeText(
-      join(project, `.codex/skills/${systemDirectory}/internal/SKILL.md`),
-      namedSkill("internal"),
-    );
-
-    const preview = await inspect(options);
-    const result = await synchronize(options);
-
-    expect(preview.actions).toEqual(expect.arrayContaining([
-      expect.objectContaining({ status: "planned", writes: [join(project, ".claude/skills/verify-build")] }),
-      expect.objectContaining({ status: "planned", removes: [duplicate] }),
-    ]));
-    expect(result.status).toBe("ok");
-    await expect(lstat(duplicate)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(result.definitions?.some((definition) => definition.name === "internal")).toBe(false);
-    expect(result.actions?.some((action) => action.removes?.includes(duplicate) && (action.backups?.length ?? 0) > 0)).toBe(true);
   });
 
   it("does not hide a Claude skill named .system", async () => {

@@ -4,7 +4,6 @@ import { isAbsolute, join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
 
 export interface OverlordConfig {
-  version: 2;
   roots: string[];
 }
 
@@ -37,7 +36,7 @@ export async function loadConfig(canonicalRoot: string, home: string): Promise<O
   try {
     source = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, roots: [] };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { roots: [] };
     throw new ConfigError("Configuration cannot be read", path, error instanceof Error ? error.message : String(error));
   }
 
@@ -69,10 +68,10 @@ export async function loadConfig(canonicalRoot: string, home: string): Promise<O
     );
   }
 
-  const config = parsed as { version: 2; roots?: string[] };
+  const config = parsed as { roots: string[] };
   const roots: string[] = [];
   const seen = new Set<string>();
-  for (const [index, configuredRoot] of (config.roots ?? []).entries()) {
+  for (const [index, configuredRoot] of config.roots.entries()) {
     const homeRelative = configuredRoot.startsWith("~/");
     if (!homeRelative && !isAbsolute(configuredRoot)) {
       throw new ConfigError(
@@ -86,10 +85,10 @@ export async function loadConfig(canonicalRoot: string, home: string): Promise<O
     seen.add(normalizedRoot);
     roots.push(normalizedRoot);
   }
-  return { version: 2, roots };
+  return { roots };
 }
 
 export function renderConfig(config: OverlordConfig): string {
-  const ordered: Record<string, unknown> = { version: 2, roots: config.roots };
+  const ordered: Record<string, unknown> = { roots: config.roots };
   return stringify(ordered, { lineWidth: 0, indent: 2 });
 }

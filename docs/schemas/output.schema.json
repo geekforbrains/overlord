@@ -203,6 +203,26 @@
         "backups": {
           "type": "array",
           "items": { "$ref": "#/$defs/absolutePath" }
+        },
+        "commit": { "$ref": "#/$defs/gitCommit" }
+      }
+    },
+    "gitCommit": {
+      "type": "object",
+      "required": ["repository", "sha", "message", "files"],
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "$ref": "#/$defs/absolutePath" },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40,64}$"
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "origin": { "$ref": "#/$defs/absolutePath" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/absolutePath" }
         }
       }
     },

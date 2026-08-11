@@ -32,7 +32,7 @@ async function fixture() {
   };
   await writeText(
     join(home, ".agents/overlord/overlord.yaml"),
-    `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+    `roots:\n  - ${discoveryRoot}\n`,
   );
   return { home, discoveryRoot, options };
 }
@@ -140,7 +140,7 @@ describe("fleet synchronization", () => {
     const options: EngineOptions = { home, env: {} };
     await writeText(
       join(home, ".agents/overlord/overlord.yaml"),
-      `version: 2\nroots:\n  - ${missing}\n`,
+      `roots:\n  - ${missing}\n`,
     );
 
     const result = await inspect(options);
@@ -160,7 +160,7 @@ describe("fleet synchronization", () => {
     };
     await writeText(
       join(home, ".agents/overlord/overlord.yaml"),
-      `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+      `roots:\n  - ${discoveryRoot}\n`,
     );
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
 
@@ -190,7 +190,7 @@ describe("fleet synchronization", () => {
     };
     await writeText(
       join(home, ".agents/overlord/overlord.yaml"),
-      `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+      `roots:\n  - ${discoveryRoot}\n`,
     );
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
 
@@ -214,7 +214,7 @@ describe("fleet synchronization", () => {
     };
     await writeText(
       join(home, ".agents/overlord/overlord.yaml"),
-      `version: 2\nroots:\n  - ${discoveryRoot}\n`,
+      `roots:\n  - ${discoveryRoot}\n`,
     );
     await writeText(join(home, ".agents/skills/user-skill/SKILL.md"), namedSkill("user-skill"));
     await writeText(join(project, ".agents/skills/project-skill/SKILL.md"), namedSkill("project-skill"));

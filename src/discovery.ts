@@ -19,7 +19,6 @@ const ARTIFACT_ROOTS = [
   [".agents", "overlord", "agents"],
   [".claude", "skills"],
   [".claude", "agents"],
-  [".codex", "skills"],
   [".codex", "agents"],
 ] as const;
 
@@ -59,7 +58,7 @@ function detail(error: unknown): string {
 /**
  * Discover independent project scopes below explicitly configured boundaries.
  * Provider and canonical directories are inspected as markers but are never
- * traversed, and configured roots themselves are never returned as projects.
+ * traversed. Configured roots are project candidates just like descendants.
  */
 export async function discoverScopes(options: DiscoverScopesOptions): Promise<DiscoveryResult> {
   const diagnostics: Diagnostic[] = [];
@@ -143,6 +142,17 @@ export async function discoverScopes(options: DiscoverScopesOptions): Promise<Di
     return false;
   }
 
+  async function addProjectIfPresent(directory: string, physicalDirectory: string, discoveryRoot: string): Promise<void> {
+    if (physicalDirectory === physicalHome || projects.has(physicalDirectory)) return;
+    if (!await containsArtifacts(directory)) return;
+    projects.set(physicalDirectory, {
+      type: "project",
+      path: directory,
+      canonical: join(directory, ".agents"),
+      discoveryRoot,
+    });
+  }
+
   async function walk(directory: string, discoveryRoot: string): Promise<void> {
     let entries;
     try {
@@ -177,14 +187,7 @@ export async function discoverScopes(options: DiscoverScopesOptions): Promise<Di
       if (visitedDirectories.has(physicalChild)) continue;
       visitedDirectories.add(physicalChild);
 
-      if (physicalChild !== physicalHome && await containsArtifacts(child) && !projects.has(physicalChild)) {
-        projects.set(physicalChild, {
-          type: "project",
-          path: child,
-          canonical: join(child, ".agents"),
-          discoveryRoot,
-        });
-      }
+      await addProjectIfPresent(child, physicalChild, discoveryRoot);
       await walk(child, discoveryRoot);
     }
   }
@@ -192,6 +195,7 @@ export async function discoverScopes(options: DiscoverScopesOptions): Promise<Di
   for (const root of roots) {
     if (visitedDirectories.has(root.physicalPath)) continue;
     visitedDirectories.add(root.physicalPath);
+    await addProjectIfPresent(root.path, root.physicalPath, root.path);
     await walk(root.path, root.path);
   }
 

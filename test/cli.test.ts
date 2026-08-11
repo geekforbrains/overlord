@@ -54,7 +54,7 @@ async function fleetFixture() {
   const project = join(root, "project");
   await writeText(
     join(home, ".agents/overlord/overlord.yaml"),
-    `version: 2\nroots:\n  - ${JSON.stringify(root)}\n`,
+    `roots:\n  - ${JSON.stringify(root)}\n`,
   );
   await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
   return { home, project };
@@ -103,18 +103,6 @@ describe("CLI contract", () => {
     const { home } = await fleetFixture();
     expect(await runCli(["status", "--json"], captureIo().io, runtime(home))).toBe(0);
     expect(await runCli(["check", "--json"], captureIo().io, runtime(home))).toBe(1);
-  });
-
-  it("prints backup paths for successful human sync actions", async () => {
-    const { home, project } = await fleetFixture();
-    const captured = captureIo();
-    await writeText(join(project, ".codex/skills/verify-build/SKILL.md"), validSkill);
-
-    expect(await runCli(["sync"], captured.io, runtime(home))).toBe(0);
-
-    const backupLine = captured.stdout().split("\n").find((line) => line.startsWith("  backup: "));
-    expect(backupLine).toContain(join(project, ".codex/.overlord-backups"));
-    expect(captured.stderr()).toBe("");
   });
 
   it("returns the same fleet regardless of the working directory", async () => {

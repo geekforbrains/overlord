@@ -11,7 +11,6 @@ describe("fleet configuration", () => {
     const home = await temporaryDirectory();
 
     await expect(loadConfig(join(home, ".agents"), home)).resolves.toEqual({
-      version: 2,
       roots: [],
     });
   });
@@ -24,7 +23,6 @@ describe("fleet configuration", () => {
     await writeText(
       join(canonicalRoot, "overlord", "overlord.yaml"),
       [
-        "version: 2",
         "roots:",
         "  - ~/Projects",
         `  - ${clients}`,
@@ -36,7 +34,6 @@ describe("fleet configuration", () => {
     );
 
     await expect(loadConfig(canonicalRoot, home)).resolves.toEqual({
-      version: 2,
       roots: [projects, clients],
     });
   });
@@ -45,7 +42,7 @@ describe("fleet configuration", () => {
     const home = await temporaryDirectory();
     const canonicalRoot = join(home, ".agents");
     const path = join(canonicalRoot, "overlord", "overlord.yaml");
-    await writeText(path, "version: 2\nroots:\n  - Projects\n");
+    await writeText(path, "roots:\n  - Projects\n");
 
     await expect(loadConfig(canonicalRoot, home)).rejects.toMatchObject({
       code: "config-invalid",
@@ -57,7 +54,7 @@ describe("fleet configuration", () => {
     const home = await temporaryDirectory();
     const canonicalRoot = join(home, ".agents");
     const path = join(canonicalRoot, "overlord", "overlord.yaml");
-    await writeText(path, "version: 2\nroots: []\nproject: /tmp/example\n");
+    await writeText(path, "roots: []\nproject: /tmp/example\n");
 
     await expect(loadConfig(canonicalRoot, home)).rejects.toMatchObject({
       code: "config-invalid",
@@ -65,11 +62,11 @@ describe("fleet configuration", () => {
     });
   });
 
-  it("rejects the legacy version 1 configuration", async () => {
+  it("rejects configuration version fields", async () => {
     const home = await temporaryDirectory();
     const canonicalRoot = join(home, ".agents");
     const path = join(canonicalRoot, "overlord", "overlord.yaml");
-    await writeText(path, "version: 1\nroots: []\n");
+    await writeText(path, "version: 2\nroots: []\n");
 
     await expect(loadConfig(canonicalRoot, home)).rejects.toMatchObject({
       code: "config-invalid",
@@ -77,9 +74,9 @@ describe("fleet configuration", () => {
     });
   });
 
-  it("renders only the version and discovery roots", () => {
-    expect(renderConfig({ version: 2, roots: ["/srv/projects", "/work/clients"] })).toBe(
-      "version: 2\nroots:\n  - /srv/projects\n  - /work/clients\n",
+  it("renders only discovery roots", () => {
+    expect(renderConfig({ roots: ["/srv/projects", "/work/clients"] })).toBe(
+      "roots:\n  - /srv/projects\n  - /work/clients\n",
     );
   });
 });
