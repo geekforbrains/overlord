@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { cleanupTemporaryDirectories, temporaryDirectory, validAgent, validSkill, writeText } from "./helpers.js";
 import { loadCanonicalScope } from "../src/definitions.js";
@@ -38,17 +38,6 @@ describe("canonical definitions", () => {
     expect(loaded.diagnostics[0]?.message).toContain("directory name");
   });
 
-  it("ignores operating-system artifacts while retaining ordinary dotfiles", async () => {
-    const root = await temporaryDirectory();
-    const skill = join(root, ".agents/skills/verify-build");
-    await writeText(join(skill, "SKILL.md"), validSkill);
-    await writeText(join(skill, ".DS_Store"), "noise");
-    await writeText(join(skill, ".env.example"), "SAFE=true\n");
-    const loaded = await loadCanonicalScope(join(root, ".agents"));
-    expect(loaded.skills[0]?.files.map((file) => file.relativePath)).toContain(".env.example");
-    expect(loaded.skills[0]?.files.map((file) => file.relativePath)).not.toContain(".DS_Store");
-  });
-
   it("loads canonical agents and warns while passing through unknown overlay fields", async () => {
     const root = await temporaryDirectory();
     await writeText(join(root, ".agents/overlord/agents/reviewer.md"), validAgent.replace("tools:", "tols:"));
@@ -83,16 +72,6 @@ describe("canonical definitions", () => {
     const loaded = await loadCanonicalScope(join(root, ".agents"));
     expect(loaded.agents[0]?.valid).toBe(false);
     expect(loaded.diagnostics.some((entry) => entry.code === "non-portable-name")).toBe(true);
-  });
-
-  it("preserves executable mode in its skill inventory", async () => {
-    const root = await temporaryDirectory();
-    const path = join(root, ".agents/skills/verify-build/scripts/check.sh");
-    await writeText(join(root, ".agents/skills/verify-build/SKILL.md"), validSkill);
-    await writeText(path, "#!/bin/sh\n", 0o644);
-    await chmod(path, 0o751);
-    const loaded = await loadCanonicalScope(join(root, ".agents"));
-    expect(loaded.skills[0]?.files.find((file) => file.relativePath === "scripts/check.sh")?.mode).toBe(0o751);
   });
 
   it("enforces the Agent Skills description limit", async () => {

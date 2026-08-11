@@ -408,11 +408,13 @@ describe("fleet safety contracts", () => {
     await writeText(join(canonical, "SKILL.md"), validSkill);
     await writeText(join(canonical, ".DS_Store"), "canonical noise\n");
     await writeText(join(canonical, "._resource"), "canonical noise\n");
+    await writeText(join(canonical, ".env.example"), "SAFE=true\n");
 
     await synchronize(options);
 
     await expect(lstat(join(native, ".DS_Store"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(lstat(join(native, "._resource"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(native, ".env.example"), "utf8")).toBe("SAFE=true\n");
     await writeText(join(native, "Desktop.ini"), "native noise\n");
     await writeText(join(native, "._other"), "native noise\n");
     expect((await inspect(options)).definitions).toContainEqual(expect.objectContaining({

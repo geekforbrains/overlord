@@ -8,7 +8,7 @@ export interface OverlordConfig {
   roots: string[];
 }
 
-export class ConfigError extends Error {
+class ConfigError extends Error {
   readonly code = "config-invalid" as const;
   constructor(message: string, readonly path: string, readonly detail?: string) {
     super(message);

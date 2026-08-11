@@ -38,22 +38,13 @@ export interface Diagnostic {
 /** Provider-specific fields are preserved without translation. */
 export type TargetOverlay = Record<string, unknown>;
 
-export interface SkillFile {
-  relativePath: string;
-  path: string;
-  mode: number;
-  contents: Buffer;
-}
-
+/**
+ * A canonical skill is identified by its directory; the payload itself is read
+ * on demand by the copy and comparison passes rather than retained here.
+ */
 export interface CanonicalSkill {
   name: string;
-  description: string;
-  body: string;
   path: string;
-  skillFile: string;
-  attributes: Record<string, unknown>;
-  files: SkillFile[];
-  directories: string[];
   valid: boolean;
 }
 

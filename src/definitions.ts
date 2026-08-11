@@ -7,7 +7,6 @@ import type {
   CanonicalScope,
   CanonicalSkill,
   Diagnostic,
-  SkillFile,
   TargetName,
   TargetOverlay,
 } from "./types.js";
@@ -104,18 +103,11 @@ function ignoredArtifact(name: string): boolean {
   return IGNORED_ARTIFACT_NAMES.has(name) || name.startsWith("._");
 }
 
-interface SkillInventory {
-  files: SkillFile[];
-  directories: string[];
-  valid: boolean;
-}
-
-async function inventorySkill(
+/** Report every entry in a canonical skill tree that cannot be copied verbatim. */
+async function validateSkillTree(
   root: string,
   diagnostics: Diagnostic[],
-): Promise<SkillInventory> {
-  const files: SkillFile[] = [];
-  const directories: string[] = [];
+): Promise<boolean> {
   let valid = true;
 
   async function walk(directory: string): Promise<void> {
@@ -152,20 +144,16 @@ async function inventorySkill(
       if (ignoredArtifact(entry.name)) continue;
 
       if (entry.isDirectory()) {
-        directories.push(relativePath);
         await walk(absolutePath);
         continue;
       }
 
       try {
-        const metadata = await lstat(absolutePath);
         if (entry.isFile()) {
-          files.push({
-            relativePath,
-            path: absolutePath,
-            mode: metadata.mode & 0o777,
-            contents: await readFile(absolutePath),
-          });
+          // Prove the payload is readable now so an unreadable file is a
+          // diagnostic rather than a mid-copy failure. The bytes are re-read by
+          // whichever pass actually needs them.
+          await readFile(absolutePath);
         } else {
           valid = false;
           diagnostic(
@@ -190,9 +178,7 @@ async function inventorySkill(
   }
 
   await walk(root);
-  files.sort((left, right) => compareText(left.relativePath, right.relativePath));
-  directories.sort(compareText);
-  return { files, directories, valid };
+  return valid;
 }
 
 async function loadSkill(
@@ -210,17 +196,7 @@ async function loadSkill(
         "A canonical skill must be a real directory inside .agents; top-level definition symlinks are not supported.",
         directory,
       );
-      return {
-        name: directoryName,
-        description: "",
-        body: "",
-        path: directory,
-        skillFile,
-        attributes: {},
-        files: [],
-        directories: [],
-        valid: false,
-      };
+      return { name: directoryName, path: directory, valid: false };
     }
   } catch (error) {
     diagnostic(
@@ -230,26 +206,14 @@ async function loadSkill(
       `Cannot inspect canonical skill directory: ${error instanceof Error ? error.message : String(error)}`,
       directory,
     );
-    return {
-      name: directoryName,
-      description: "",
-      body: "",
-      path: directory,
-      skillFile,
-      attributes: {},
-      files: [],
-      directories: [],
-      valid: false,
-    };
+    return { name: directoryName, path: directory, valid: false };
   }
-  const inventory = await inventorySkill(directory, diagnostics);
+  let valid = await validateSkillTree(directory, diagnostics);
   let attributes: Record<string, unknown> = {};
-  let body = "";
-  let valid = inventory.valid;
 
   try {
     const source = await readFile(skillFile, "utf8");
-    ({ attributes, body } = parseFrontmatter(source, skillFile));
+    ({ attributes } = parseFrontmatter(source, skillFile));
   } catch (error) {
     valid = false;
     const missing = isMissing(error);
@@ -267,7 +231,6 @@ async function loadSkill(
   const declaredName = stringField(attributes.name);
   const name = declaredName ?? directoryName;
   const declaredDescription = stringField(attributes.description);
-  const description = declaredDescription ?? "";
 
   if (declaredName === undefined || declaredName.length === 0) {
     valid = false;
@@ -314,17 +277,7 @@ async function loadSkill(
     );
   }
 
-  return {
-    name,
-    description,
-    body,
-    path: directory,
-    skillFile,
-    attributes,
-    files: inventory.files,
-    directories: inventory.directories,
-    valid,
-  };
+  return { name, path: directory, valid };
 }
 
 function editDistance(left: string, right: string): number {

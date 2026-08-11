@@ -210,7 +210,8 @@ export async function copyDirectoryExclusive(source: string, destination: string
   }
 }
 
-async function displaceToBackup(path: string, artifactRoot: string): Promise<string> {
+/** Atomically move an artifact out of its inventory root into a recoverable backup. */
+export async function removeWithBackup(path: string, artifactRoot: string): Promise<string> {
   const boundary = dirname(artifactRoot);
   const backupContainer = join(boundary, ".overlord-backups");
   const backupDirectory = join(backupContainer, randomUUID());
@@ -234,18 +235,13 @@ async function displaceToBackup(path: string, artifactRoot: string): Promise<str
   return backup;
 }
 
-/** Atomically move an artifact out of its inventory root into a recoverable backup. */
-export async function removeWithBackup(path: string, artifactRoot: string): Promise<string> {
-  return displaceToBackup(path, artifactRoot);
-}
-
 /** Atomically displace a file, then exclusively publish its replacement. */
 export async function replaceFileWithBackup(
   path: string,
   contents: string | Buffer,
   artifactRoot: string,
 ): Promise<string> {
-  const backup = await displaceToBackup(path, artifactRoot);
+  const backup = await removeWithBackup(path, artifactRoot);
   try {
     await writeFileAtomicExclusive(path, contents);
   } catch (error) {
