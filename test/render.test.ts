@@ -60,15 +60,15 @@ describe("agent adapters", () => {
   });
 
   it("round-trips native Claude fields semantically", () => {
-    const adopted = parseClaudeAgent(renderClaudeAgent(agent), "reviewer", "/native/reviewer.md");
-    expect(renderClaudeAgent(adopted)).toBe(renderClaudeAgent(agent));
-    expect(adopted.targets.claude).toEqual(agent.targets.claude);
+    const roundTripped = parseClaudeAgent(renderClaudeAgent(agent), "reviewer", "/native/reviewer.md");
+    expect(renderClaudeAgent(roundTripped)).toBe(renderClaudeAgent(agent));
+    expect(roundTripped.targets.claude).toEqual(agent.targets.claude);
   });
 
   it("round-trips native Codex fields semantically", () => {
-    const adopted = parseCodexAgent(renderCodexAgent(agent), "reviewer", "/native/reviewer.toml");
-    expect(renderCodexAgent(adopted)).toBe(renderCodexAgent(agent));
-    expect(adopted.targets.codex).toEqual(agent.targets.codex);
+    const roundTripped = parseCodexAgent(renderCodexAgent(agent), "reviewer", "/native/reviewer.toml");
+    expect(renderCodexAgent(roundTripped)).toBe(renderCodexAgent(agent));
+    expect(roundTripped.targets.codex).toEqual(agent.targets.codex);
   });
 
   it("omits disabled targets", () => {

@@ -90,7 +90,7 @@
       "description": "An absolute filesystem path."
     },
     "state": {
-      "enum": ["synced", "missing", "unadopted", "conflict", "invalid"]
+      "enum": ["synced", "missing", "changed", "conflict", "invalid"]
     },
     "kind": { "enum": ["skill", "agent"] },
     "targetName": { "enum": ["claude", "codex"] },
@@ -197,10 +197,6 @@
           "items": { "$ref": "#/$defs/absolutePath" }
         },
         "removes": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/absolutePath" }
-        },
-        "backups": {
           "type": "array",
           "items": { "$ref": "#/$defs/absolutePath" }
         },

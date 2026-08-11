@@ -64,7 +64,7 @@ describe("fleet synchronization", () => {
     expect(second.actions).toEqual([]);
   });
 
-  it("automatically adopts unique native definitions into their own project", async () => {
+  it("imports unique native definitions into their own project", async () => {
     const { discoveryRoot, options } = await fixture();
     const skillProject = join(discoveryRoot, "native-skill");
     const agentProject = join(discoveryRoot, "nested/native-agent");

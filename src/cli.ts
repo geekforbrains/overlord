@@ -190,7 +190,7 @@ function definitionLine(definition: DefinitionRecord): string {
   const marker: Record<DefinitionRecord["state"], string> = {
     synced: "ok",
     missing: "missing",
-    unadopted: "unadopted",
+    changed: "changed",
     conflict: "conflict",
     invalid: "invalid",
   };
@@ -202,7 +202,6 @@ function writeHuman(io: CliIo, document: OutputDocument): void {
     io.stderr(`overlord: ${document.error?.message ?? "Unknown error"}\n`);
     for (const action of document.actions ?? []) {
       io.stderr(`completed: ${action.description}\n`);
-      for (const backup of action.backups ?? []) io.stderr(`  backup: ${backup}\n`);
     }
     if (document.error?.code === "usage") io.stderr("Try 'overlord --help' for usage.\n");
     return;
@@ -216,7 +215,6 @@ function writeHuman(io: CliIo, document: OutputDocument): void {
   }
   for (const action of document.actions ?? []) {
     io.stdout(`${action.status === "completed" ? "+" : "?"} ${action.description}\n`);
-    for (const backup of action.backups ?? []) io.stdout(`  backup: ${backup}\n`);
   }
   for (const entry of document.diagnostics ?? []) {
     const destination = entry.severity === "info" ? io.stdout : io.stderr;

@@ -154,15 +154,15 @@ Claude agent inventory is recursive below `.claude/agents`; Codex agent inventor
 
 Overlord MUST retain a machine-local record of the last successfully synchronized content for every definition and endpoint. This ledger MUST live below `~/.agents/.git`, MUST be keyed by physical scope path and provider endpoint, and MUST NOT add state files to a project repository. The ledger is synchronization metadata, not canonical skill or agent content.
 
-Every definition record MUST have one aggregate state with precedence `invalid`, `conflict`, `unadopted`, `missing`, then `synced`.
+Every definition record MUST have one aggregate state with precedence `invalid`, `conflict`, `changed`, `missing`, then `synced`.
 
 - `synced` means every required endpoint matches canonical content, or the endpoint reads canonical content directly.
 - `missing` means valid content exists in a scope but an endpoint with no deletion receipt is absent and must be materialized.
-- `unadopted` means one provider endpoint contains an unambiguous addition or change that has not yet been incorporated into canonical source.
+- `changed` means one endpoint contains an unambiguous addition, edit, or tracked deletion relative to the last successful sync.
 - `conflict` means multiple sides changed incompatibly from their common baseline, modification competes with deletion, a same-target duplicate is ambiguous, or output exists for a disabled agent target.
 - `invalid` means canonical or native syntax, names, paths, overlays, entry types, or symlinks violate this specification.
 
-Fleet status MUST be `attention-required` when any definition is missing, unadopted, conflicting, or invalid, or when any error diagnostic exists; otherwise it MUST be `ok`.
+Fleet status MUST be `attention-required` when any definition is missing, changed, conflicting, or invalid, or when any error diagnostic exists; otherwise it MUST be `ok`.
 
 An invalid record attached to canonical content MUST block all mutations in that scope after preflight, while an invalid provider-only record MUST remain untouched without blocking unrelated valid definitions in that scope.
 

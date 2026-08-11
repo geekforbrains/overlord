@@ -4,7 +4,7 @@ import type { EngineOptions, Scope } from "./types.js";
 
 export interface TargetPaths {
   claude: { skills: string; agents: string };
-  codex: { skills: string; agents: string };
+  codex: { agents: string };
 }
 
 function userTargetRoot(value: string | undefined, fallback: string, home: string): string {
@@ -20,10 +20,7 @@ export function resolveTargetPaths(scope: Scope, options: EngineOptions): Target
         skills: join(scope.path, ".claude", "skills"),
         agents: join(scope.path, ".claude", "agents"),
       },
-      codex: {
-        skills: join(scope.path, ".codex", "skills"),
-        agents: join(scope.path, ".codex", "agents"),
-      },
+      codex: { agents: join(scope.path, ".codex", "agents") },
     };
   }
 
@@ -31,6 +28,6 @@ export function resolveTargetPaths(scope: Scope, options: EngineOptions): Target
   const codexRoot = userTargetRoot(options.env.CODEX_HOME, join(options.home, ".codex"), options.home);
   return {
     claude: { skills: join(claudeRoot, "skills"), agents: join(claudeRoot, "agents") },
-    codex: { skills: join(codexRoot, "skills"), agents: join(codexRoot, "agents") },
+    codex: { agents: join(codexRoot, "agents") },
   };
 }

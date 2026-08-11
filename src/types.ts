@@ -3,7 +3,7 @@ export type TargetName = "claude" | "codex";
 
 export type ArtifactKind = "skill" | "agent";
 export type ScopeType = "user" | "project";
-export type DefinitionState = "synced" | "missing" | "unadopted" | "conflict" | "invalid";
+export type DefinitionState = "synced" | "missing" | "changed" | "conflict" | "invalid";
 export type Severity = "info" | "warning" | "error";
 
 interface ScopeBase {
@@ -95,8 +95,6 @@ export interface ActionRecord {
   reads?: string[];
   writes?: string[];
   removes?: string[];
-  /** Recoverable backup paths created by an executed destructive action. */
-  backups?: string[];
 }
 
 export interface SummaryRecord {

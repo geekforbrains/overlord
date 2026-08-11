@@ -210,47 +210,75 @@ export async function copyDirectoryExclusive(source: string, destination: string
   }
 }
 
-/** Atomically move an artifact out of its inventory root into a recoverable backup. */
-export async function removeWithBackup(path: string, artifactRoot: string): Promise<string> {
-  const boundary = dirname(artifactRoot);
-  const backupContainer = join(boundary, ".overlord-backups");
-  const backupDirectory = join(backupContainer, randomUUID());
-  const backup = join(backupDirectory, basename(path));
-  await assertNoSymlinkedParent(backup, boundary);
-  try {
-    await mkdir(backupContainer, { recursive: false, mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  const containerMetadata = await lstat(backupContainer);
-  if (containerMetadata.isSymbolicLink() || !containerMetadata.isDirectory()) {
-    throw Object.assign(new Error(`Backup root must be a physical directory: ${backupContainer}`), {
+/** Atomically replace a physical file without retaining a persistent backup. */
+export async function replaceFileAtomic(path: string, contents: string | Buffer, mode?: number): Promise<void> {
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw Object.assign(new Error(`Replacement target must be a physical file: ${path}`), {
       code: "permission-denied",
-      path: backupContainer,
+      path,
     });
   }
-  await mkdir(backupDirectory, { recursive: false, mode: 0o700 });
-  await assertNoSymlinkedParent(backup, boundary);
-  await rename(path, backup);
-  return backup;
+  const temporary = join(dirname(path), `.overlord-${basename(path)}-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, mode === undefined ? undefined : { mode });
+    if (mode !== undefined) await chmod(temporary, mode);
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
-/** Atomically displace a file, then exclusively publish its replacement. */
-export async function replaceFileWithBackup(
-  path: string,
-  contents: string | Buffer,
-  artifactRoot: string,
-): Promise<string> {
-  const backup = await removeWithBackup(path, artifactRoot);
+/** Replace a physical skill directory with a validated tree and rollback on publication failure. */
+export async function replaceDirectoryAtomic(source: string, destination: string): Promise<void> {
+  const metadata = await lstat(destination);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw Object.assign(new Error(`Replacement target must be a physical directory: ${destination}`), {
+      code: "permission-denied",
+      path: destination,
+    });
+  }
+
+  const identifier = randomUUID();
+  const staged = join(dirname(destination), `.overlord-${basename(destination)}-${identifier}.tmp`);
+  const rollback = join(dirname(destination), `.overlord-${basename(destination)}-${identifier}.rollback`);
+  await copyDirectoryExclusive(source, staged);
+  let displaced = false;
   try {
-    await writeFileAtomicExclusive(path, contents);
-  } catch (error) {
-    if (error !== null && typeof error === "object") {
-      Object.assign(error, { createdBackups: [backup] });
+    await rename(destination, rollback);
+    displaced = true;
+    try {
+      await rename(staged, destination);
+    } catch (error) {
+      await rename(rollback, destination);
+      displaced = false;
+      throw error;
     }
+    displaced = false;
+    await rm(rollback, { recursive: true, force: true });
+  } finally {
+    await rm(staged, { recursive: true, force: true }).catch(() => undefined);
+    if (displaced) await rename(rollback, destination).catch(() => undefined);
+  }
+}
+
+/** Remove one managed physical artifact, rejecting symlinks and unexpected entry types. */
+export async function removePhysicalArtifact(path: string, kind: "directory" | "file"): Promise<void> {
+  let metadata: Awaited<ReturnType<typeof lstat>>;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  return backup;
+  const matchesKind = kind === "directory" ? metadata.isDirectory() : metadata.isFile();
+  if (metadata.isSymbolicLink() || !matchesKind) {
+    throw Object.assign(new Error(`Removal target must be a physical ${kind}: ${path}`), {
+      code: "permission-denied",
+      path,
+    });
+  }
+  await rm(path, { recursive: kind === "directory" });
 }
 
 export function lockPathForScope(scopePath: string): string {

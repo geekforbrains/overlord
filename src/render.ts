@@ -279,7 +279,7 @@ export function parseCodexAgent(
   return nativeAgent(name, expectedName, description, body, path, "codex", overlay);
 }
 
-/** Deterministically serialize an adopted agent back into canonical Markdown. */
+/** Deterministically serialize a provider-derived agent into canonical Markdown. */
 export function renderCanonicalAgent(agent: CanonicalAgent): string {
   assertCommonFields(agent);
   const targets = entriesObject([

@@ -187,10 +187,10 @@ describe("CLI contract", () => {
     expect(valid).toBe(false);
   });
 
-  it("rejects a legacy fleet configuration before init mutates user files", async () => {
+  it("rejects an invalid fleet configuration before init mutates user files", async () => {
     const home = await temporaryDirectory();
     const captured = captureIo();
-    await writeText(join(home, ".agents/overlord/overlord.yaml"), "version: 1\nroots: []\n");
+    await writeText(join(home, ".agents/overlord/overlord.yaml"), "roots: []\nproject: /tmp/example\n");
 
     const code = await runCli(["init", "--json"], captured.io, runtime(home));
     const document = await parseSingleJson(captured.stdout());

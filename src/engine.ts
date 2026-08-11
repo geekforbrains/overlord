@@ -1,37 +1,43 @@
-import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 
 import { configPath, loadConfig, renderConfig } from "./config.js";
-import { isPortableSkillName, loadCanonicalScope } from "./definitions.js";
+import { loadCanonicalScope } from "./definitions.js";
 import { discoverScopes, type DiscoveryResult } from "./discovery.js";
 import {
   acquireScopeLock,
   assertNoSymlinkedParent,
   compareDirectories,
   copyDirectoryExclusive,
-  IGNORED_SKILL_FILES,
   pathExists,
-  removeWithBackup,
-  replaceFileWithBackup,
+  removePhysicalArtifact,
+  replaceDirectoryAtomic,
+  replaceFileAtomic,
   writeFileAtomicExclusive,
 } from "./filesystem.js";
-import { parseFrontmatter } from "./frontmatter.js";
 import {
-  parseClaudeAgent,
-  parseCodexAgent,
+  deleteLedgerEntry,
+  digestFile,
+  digestSkillTree,
+  loadScopeLedger,
+  saveScopeLedger,
+  setLedgerEntry,
+  type LedgerEntry,
+  type ScopeLedger,
+} from "./ledger.js";
+import { scanNative as scanSupportedNative } from "./native.js";
+import {
   renderCanonicalAgent,
   renderClaudeAgent,
   renderCodexAgent,
 } from "./render.js";
+import { buildReconciliationPlans, recordForPlan, type ReconciliationPlan } from "./reconciliation.js";
 import { resolveTargetPaths, type TargetPaths } from "./targets.js";
 import type {
   ActionRecord,
-  ArtifactKind,
   CanonicalAgent,
   CanonicalScope,
-  CanonicalSkill,
-  DefinitionOutput,
   DefinitionRecord,
   DefinitionState,
   Diagnostic,
@@ -42,34 +48,23 @@ import type {
   TargetName,
 } from "./types.js";
 
-const FAILING_STATES = new Set<DefinitionState>(["missing", "unadopted", "conflict", "invalid"]);
-
-interface NativeDefinition {
-  kind: ArtifactKind;
-  name: string;
-  target: TargetName;
-  path: string;
-  valid: boolean;
-  scanOnly?: boolean;
-  agent?: CanonicalAgent;
-  evidence?: string;
-}
+const FAILING_STATES = new Set<DefinitionState>(["missing", "changed", "conflict", "invalid"]);
 
 interface ScopeContext {
   scope: Scope;
   expectedPhysicalPath: string | undefined;
+  scopeIdentity: string;
   paths: TargetPaths;
+  ledger: ScopeLedger;
   canonical: CanonicalScope;
-  native: NativeDefinition[];
   definitions: DefinitionRecord[];
+  plans: ReconciliationPlan[];
   diagnostics: Diagnostic[];
   actions: ActionRecord[];
 }
 
 interface ProgressCarrier {
   completedActions?: ActionRecord[];
-  createdBackups?: string[];
-  createdPaths?: string[];
 }
 
 function withCompletedActions(error: unknown, actions: ActionRecord[]): Error {
@@ -109,18 +104,6 @@ function completedActions(error: unknown): ActionRecord[] {
   return Array.isArray(value) ? value : [];
 }
 
-function createdBackups(error: unknown): string[] {
-  if (error === null || typeof error !== "object") return [];
-  const value = (error as ProgressCarrier).createdBackups;
-  return Array.isArray(value) ? value : [];
-}
-
-function createdPaths(error: unknown): string[] {
-  if (error === null || typeof error !== "object") return [];
-  const value = (error as ProgressCarrier).createdPaths;
-  return Array.isArray(value) ? value : [];
-}
-
 function errorCode(error: unknown): string | undefined {
   if (error === null || typeof error !== "object" || !("code" in error)) return undefined;
   return typeof error.code === "string" ? error.code : undefined;
@@ -145,10 +128,6 @@ function scopeFailure(scope: Scope, error: unknown): Diagnostic {
   const record = error !== null && typeof error === "object" ? error as { path?: unknown } : undefined;
   const path = typeof record?.path === "string" ? record.path : scope.path;
   return diagnostic("error", code, `Scope '${scope.path}' could not be processed: ${message}`, path, scope.path);
-}
-
-function key(kind: ArtifactKind, name: string): string {
-  return `${kind}:${name}`;
 }
 
 function actionId(scope: Scope, operation: string): string {
@@ -237,450 +216,6 @@ async function assertContextParent(context: ScopeContext, destination: string, b
   );
 }
 
-function output(target: TargetName, path: string, state: DefinitionState, direct = false): DefinitionOutput {
-  const result: DefinitionOutput = { target, path, state };
-  if (direct) result.readsCanonicalDirectly = true;
-  return result;
-}
-
-function aggregateState(states: readonly DefinitionState[]): DefinitionState {
-  for (const state of ["invalid", "conflict", "unadopted", "missing", "synced"] as const) {
-    if (states.includes(state)) return state;
-  }
-  return "synced";
-}
-
-async function directoryEntries(path: string): Promise<import("node:fs").Dirent[]> {
-  try {
-    const metadata = await lstat(path);
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      throw Object.assign(new Error(`Artifact root must be a physical directory: ${path}`), {
-        code: "permission-denied",
-        path,
-      });
-    }
-    return await readdir(path, { withFileTypes: true });
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return [];
-    throw error;
-  }
-}
-
-async function nativeSkillTreeError(root: string): Promise<string | undefined> {
-  let physicalRoot: string;
-  try {
-    physicalRoot = await realpath(root);
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  async function walk(directory: string): Promise<string | undefined> {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await readdir(directory, { withFileTypes: true });
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-    for (const entry of entries) {
-      const path = join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        return `native skill contains unsupported symlink '${relative(physicalRoot, path)}'`;
-      }
-      if (IGNORED_SKILL_FILES.has(entry.name) || entry.name.startsWith("._")) continue;
-      try {
-        if (entry.isDirectory()) {
-          const nested = await walk(path);
-          if (nested !== undefined) return nested;
-        } else if (entry.isFile()) {
-          await readFile(path);
-        } else {
-          return `skill contains unsupported filesystem entry '${relative(physicalRoot, path)}'`;
-        }
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }
-    return undefined;
-  }
-
-  return walk(physicalRoot);
-}
-
-async function scanSkillRoot(root: string, target: TargetName, scanOnly: boolean): Promise<NativeDefinition[]> {
-  const results: NativeDefinition[] = [];
-  const entries = await directoryEntries(root);
-  entries.sort((left, right) => left.name.localeCompare(right.name));
-  for (const entry of entries) {
-    const entryName = process.platform === "darwin" ? entry.name.normalize("NFD").toLowerCase() : entry.name;
-    if (target === "codex" && entryName === ".system") continue;
-    const path = join(root, entry.name);
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) {
-      if (isPortableSkillName(entry.name)) {
-        results.push({
-          kind: "skill",
-          name: entry.name,
-          target,
-          path,
-          valid: false,
-          scanOnly,
-          evidence: "native skill destination must be a directory",
-        });
-      }
-      continue;
-    }
-    if (entry.isSymbolicLink()) {
-      results.push({
-        kind: "skill",
-        name: entry.name,
-        target,
-        path,
-        valid: false,
-        scanOnly,
-        evidence: "native skill must be a physical directory",
-      });
-      continue;
-    }
-    let valid = isPortableSkillName(entry.name);
-    let evidence: string | undefined;
-    try {
-      const parsed = parseFrontmatter(await readFile(join(path, "SKILL.md"), "utf8"), join(path, "SKILL.md"));
-      if (
-        parsed.attributes.name !== entry.name
-        || typeof parsed.attributes.description !== "string"
-        || parsed.attributes.description.trim().length === 0
-        || parsed.attributes.description.length > 1_024
-      ) {
-        valid = false;
-        evidence = "native skill frontmatter is not portable or does not match its directory";
-      }
-      if (valid) {
-        const treeError = await nativeSkillTreeError(path);
-        if (treeError !== undefined) {
-          valid = false;
-          evidence = treeError;
-        }
-      }
-    } catch (error) {
-      valid = false;
-      evidence = error instanceof Error ? error.message : String(error);
-    }
-    const result: NativeDefinition = { kind: "skill", name: entry.name, target, path, valid, scanOnly };
-    if (evidence !== undefined) result.evidence = evidence;
-    results.push(result);
-  }
-  return results;
-}
-
-async function scanAgentRoot(root: string, target: TargetName): Promise<NativeDefinition[]> {
-  const paths: string[] = [];
-  const unsupported: Array<{ path: string; evidence: string }> = [];
-  if (target === "claude") {
-    async function walk(directory: string): Promise<void> {
-      const entries = await directoryEntries(directory);
-      entries.sort((left, right) => left.name.localeCompare(right.name));
-      for (const entry of entries) {
-        const path = join(directory, entry.name);
-        const extension = extname(entry.name);
-        const agentExtension = extension.toLowerCase() === ".md";
-        if (entry.isDirectory()) {
-          if (agentExtension) unsupported.push({ path, evidence: "native agent destination must be a file" });
-          await walk(path);
-        } else if (agentExtension) {
-          if (extension !== ".md") unsupported.push({ path, evidence: "Claude agent must use the lowercase '.md' extension" });
-          else if (entry.isFile() || entry.isSymbolicLink()) paths.push(path);
-          else unsupported.push({ path, evidence: "native agent destination must be a file" });
-        }
-      }
-    }
-    await walk(root);
-  } else {
-    const entries = await directoryEntries(root);
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      const extension = extname(entry.name);
-      if (extension.toLowerCase() !== ".toml") continue;
-      const path = join(root, entry.name);
-      if (extension !== ".toml") unsupported.push({ path, evidence: "Codex agent must use the lowercase '.toml' extension" });
-      else if (entry.isFile() || entry.isSymbolicLink()) paths.push(path);
-      else unsupported.push({ path, evidence: "native agent destination must be a file" });
-    }
-  }
-
-  const results: NativeDefinition[] = [];
-  for (const { path, evidence } of unsupported) {
-    results.push({
-      kind: "agent",
-      name: basename(path, extname(path)),
-      target,
-      path,
-      valid: false,
-      evidence,
-    });
-  }
-  for (const path of paths) {
-    const expectedName = basename(path, extname(path));
-    if ((await lstat(path)).isSymbolicLink()) {
-      results.push({
-        kind: "agent",
-        name: expectedName,
-        target,
-        path,
-        valid: false,
-        evidence: "native agent must be a physical file",
-      });
-      continue;
-    }
-    try {
-      const source = await readFile(path, "utf8");
-      const agent = target === "claude"
-        ? parseClaudeAgent(source, expectedName, path)
-        : parseCodexAgent(source, expectedName, path);
-      const result: NativeDefinition = { kind: "agent", name: expectedName, target, path, valid: agent.valid, agent };
-      if (!agent.valid) result.evidence = "native name is not portable or does not match its file";
-      results.push(result);
-    } catch (error) {
-      results.push({
-        kind: "agent",
-        name: expectedName,
-        target,
-        path,
-        valid: false,
-        evidence: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return results;
-}
-
-function sameCommonAgent(left: CanonicalAgent, right: CanonicalAgent): boolean {
-  const normalize = (value: string) => `${value.replace(/\r\n?/g, "\n").replace(/\n+$/g, "")}\n`;
-  return left.name === right.name
-    && left.description === right.description
-    && normalize(left.body) === normalize(right.body);
-}
-
-async function scanNative(paths: TargetPaths): Promise<NativeDefinition[]> {
-  const native = [
-    ...await scanSkillRoot(paths.claude.skills, "claude", false),
-    ...await scanAgentRoot(paths.claude.agents, "claude"),
-    ...await scanSkillRoot(paths.codex.skills, "codex", true),
-    ...await scanAgentRoot(paths.codex.agents, "codex"),
-  ];
-  native.sort((left, right) => key(left.kind, left.name).localeCompare(key(right.kind, right.name)) || left.path.localeCompare(right.path));
-  return native;
-}
-
-function nativeAt(native: readonly NativeDefinition[], path: string): NativeDefinition | undefined {
-  return native.find((entry) => samePath(entry.path, path));
-}
-
-async function skillOutputState(
-  canonical: CanonicalSkill,
-  native: NativeDefinition | undefined,
-): Promise<{ state: DefinitionState; evidence?: string }> {
-  if (!canonical.valid) return { state: "invalid", evidence: "canonical skill is invalid" };
-  if (native === undefined) return { state: "missing" };
-  if (!native.valid) {
-    return native.evidence === undefined ? { state: "invalid" } : { state: "invalid", evidence: native.evidence };
-  }
-  const comparison = await compareDirectories(canonical.path, native.path);
-  if (comparison.equal) return { state: "synced" };
-  return comparison.evidence === undefined
-    ? { state: "conflict" }
-    : { state: "conflict", evidence: comparison.evidence };
-}
-
-async function agentOutputState(
-  canonical: CanonicalAgent,
-  target: TargetName,
-  native: NativeDefinition | undefined,
-): Promise<{ state: DefinitionState; evidence?: string }> {
-  if (!canonical.valid) return { state: "invalid", evidence: "canonical agent is invalid" };
-  if (native === undefined) return { state: "missing" };
-  if (!native.valid) {
-    return native.evidence === undefined ? { state: "invalid" } : { state: "invalid", evidence: native.evidence };
-  }
-  const expected = target === "claude" ? renderClaudeAgent(canonical) : renderCodexAgent(canonical);
-  const actual = await readFile(native.path, "utf8");
-  return actual === expected
-    ? { state: "synced" }
-    : { state: "conflict", evidence: "rendered content differs" };
-}
-
-function agentRenderFailure(canonical: CanonicalAgent, target: TargetName): string | undefined {
-  try {
-    if (target === "claude") renderClaudeAgent(canonical);
-    else renderCodexAgent(canonical);
-    return undefined;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
-
-async function canonicalRecords(
-  scope: Scope,
-  canonical: CanonicalScope,
-  native: NativeDefinition[],
-  paths: TargetPaths,
-): Promise<{ records: DefinitionRecord[]; used: Set<string> }> {
-  const records: DefinitionRecord[] = [];
-  const used = new Set<string>();
-
-  for (const skill of canonical.skills) {
-    const outputs: DefinitionOutput[] = [output("codex", skill.path, skill.valid ? "synced" : "invalid", true)];
-    const evidence: string[] = [];
-    const claudePath = join(paths.claude.skills, skill.name);
-    const claude = nativeAt(native, claudePath);
-    if (claude !== undefined) used.add(claude.path);
-    const claudeState = await skillOutputState(skill, claude);
-    outputs.push(output("claude", claudePath, claudeState.state));
-    if (claudeState.evidence !== undefined) evidence.push(`claude: ${claudeState.evidence}`);
-
-    const scanPath = join(paths.codex.skills, skill.name);
-    const duplicate = nativeAt(native, scanPath);
-    if (duplicate !== undefined) {
-      used.add(duplicate.path);
-      let state: DefinitionState;
-      if (!skill.valid) state = "invalid";
-      else if (!duplicate.valid) state = "invalid";
-      else state = (await compareDirectories(skill.path, duplicate.path)).equal ? "unadopted" : "conflict";
-      outputs.push(output("codex", scanPath, state));
-      evidence.push(state === "unadopted"
-        ? "codex: redundant scan-only copy can be removed"
-        : "codex: scan-only copy differs from canonical");
-    }
-
-    const state = aggregateState(outputs.map((entry) => entry.state));
-    const record: DefinitionRecord = {
-      kind: "skill",
-      name: skill.name,
-      scope: scope.type,
-      scopePath: scope.path,
-      state,
-      canonical: skill.path,
-      outputs,
-    };
-    if (evidence.length > 0) record.evidence = evidence.join("; ");
-    records.push(record);
-  }
-
-  for (const agent of canonical.agents) {
-    const outputs: DefinitionOutput[] = [];
-    const evidence: string[] = [];
-    const conflictsWith: string[] = [];
-    for (const target of ["claude", "codex"] as const) {
-      const expectedPath = join(paths[target].agents, `${agent.name}.${target === "claude" ? "md" : "toml"}`);
-      const targetEntries = native.filter((entry) => entry.kind === "agent" && entry.target === target);
-      const expected = targetEntries.find((entry) => samePath(entry.path, expectedPath));
-      const extras = targetEntries.filter((entry) => entry.name === agent.name && !samePath(entry.path, expectedPath));
-      const related = expected === undefined ? extras : [expected, ...extras];
-      for (const entry of related) used.add(entry.path);
-
-      if (agent.targets[target] === false) {
-        for (const entry of related) {
-          outputs.push(output(target, entry.path, entry.valid ? "conflict" : "invalid"));
-          conflictsWith.push(entry.path);
-        }
-        if (related.length > 0) evidence.push(`${target}: native output exists although this target is disabled`);
-        continue;
-      }
-
-      const renderFailure = agentRenderFailure(agent, target);
-      if (renderFailure !== undefined) {
-        outputs.push(output(target, expectedPath, "invalid"));
-        evidence.push(`${target}: ${renderFailure}`);
-        continue;
-      }
-
-      const result = await agentOutputState(agent, target, expected);
-      outputs.push(output(target, expectedPath, result.state));
-      if (result.evidence !== undefined) evidence.push(`${target}: ${result.evidence}`);
-      for (const extra of extras) {
-        outputs.push(output(target, extra.path, extra.valid ? "conflict" : "invalid"));
-        conflictsWith.push(extra.path);
-      }
-      if (extras.length > 0) evidence.push(`${target}: duplicate native agent exists outside the standard output path`);
-    }
-
-    const states: DefinitionState[] = outputs.length > 0
-      ? outputs.map((entry) => entry.state)
-      : [agent.valid ? "synced" : "invalid"];
-    const record: DefinitionRecord = {
-      kind: "agent",
-      name: agent.name,
-      scope: scope.type,
-      scopePath: scope.path,
-      state: aggregateState(states),
-      canonical: agent.path,
-      outputs,
-    };
-    if (evidence.length > 0) record.evidence = evidence.join("; ");
-    if (conflictsWith.length > 0) record.conflictsWith = conflictsWith;
-    records.push(record);
-  }
-  return { records, used };
-}
-
-async function nativeOnlyRecords(
-  scope: Scope,
-  native: NativeDefinition[],
-  used: Set<string>,
-): Promise<DefinitionRecord[]> {
-  const groups = new Map<string, NativeDefinition[]>();
-  for (const entry of native) {
-    if (used.has(entry.path)) continue;
-    const entries = groups.get(key(entry.kind, entry.name)) ?? [];
-    entries.push(entry);
-    groups.set(key(entry.kind, entry.name), entries);
-  }
-
-  const records: DefinitionRecord[] = [];
-  for (const entries of groups.values()) {
-    const first = entries[0]!;
-    const outputs = entries.map((entry) => output(entry.target, entry.path, entry.valid ? "unadopted" : "invalid"));
-    let state = aggregateState(outputs.map((entry) => entry.state));
-    let evidence = entries.find((entry) => entry.evidence !== undefined)?.evidence;
-    const duplicateTarget = entries.length > 1 && new Set(entries.map((entry) => entry.target)).size !== entries.length;
-    if (state === "unadopted" && duplicateTarget) {
-      state = "conflict";
-      for (const nativeOutput of outputs) nativeOutput.state = "conflict";
-      evidence = "multiple native definitions use the same name in one target";
-    } else if (state === "unadopted" && entries.length > 1) {
-      let same = true;
-      if (first.kind === "skill") {
-        for (const entry of entries.slice(1)) {
-          same &&= (await compareDirectories(entries[0]!.path, entry.path)).equal;
-        }
-      } else {
-        for (const entry of entries.slice(1)) {
-          same &&= entries[0]!.agent !== undefined
-            && entry.agent !== undefined
-            && sameCommonAgent(entries[0]!.agent, entry.agent);
-        }
-      }
-      if (!same) {
-        state = "conflict";
-        for (const nativeOutput of outputs) nativeOutput.state = "conflict";
-        evidence = "native target definitions differ";
-      }
-    }
-
-    const record: DefinitionRecord = {
-      kind: first.kind,
-      name: first.name,
-      scope: scope.type,
-      scopePath: scope.path,
-      state,
-      canonical: null,
-      outputs,
-    };
-    if (evidence !== undefined) record.evidence = evidence;
-    if (state === "conflict") record.conflictsWith = entries.map((entry) => entry.path);
-    records.push(record);
-  }
-  return records;
-}
-
 function summarize(definitions: readonly DefinitionRecord[]): SummaryRecord {
   const byState: SummaryRecord["byState"] = {};
   for (const definition of definitions) byState[definition.state] = (byState[definition.state] ?? 0) + 1;
@@ -691,66 +226,31 @@ function summarize(definitions: readonly DefinitionRecord[]): SummaryRecord {
   };
 }
 
-function expectedAgentPath(context: ScopeContext, name: string, target: TargetName): string {
-  return join(context.paths[target].agents, `${name}.${target === "claude" ? "md" : "toml"}`);
-}
-
-function plannedActions(context: ScopeContext, definition: DefinitionRecord): ActionRecord[] {
-  const actions: ActionRecord[] = [];
-  const missingOutputs = definition.outputs.filter((entry) => entry.state === "missing");
-  if (definition.canonical !== null && definition.state !== "invalid" && missingOutputs.length > 0) {
-    const writes = missingOutputs.map((entry) => entry.path);
-    actions.push({
-      id: actionId(context.scope, `materialize-${definition.kind}-${definition.name}`),
-      status: "planned",
-      description: `Materialize missing ${definition.kind} '${definition.name}'.`,
-      scope: definition.scope,
-      scopePath: definition.scopePath,
-      reads: definition.canonical === null ? [] : [definition.canonical],
-      writes,
-    });
+function reconciliationAction(context: ScopeContext, plan: ReconciliationPlan, status: ActionRecord["status"]): ActionRecord | undefined {
+  const writes: string[] = [];
+  const removes: string[] = [];
+  if (plan.canonicalOperation === "write") writes.push(plan.canonicalPath);
+  if (plan.canonicalOperation === "remove") removes.push(plan.canonicalPath);
+  for (const operation of plan.providerOperations) {
+    (operation.operation === "write" ? writes : removes).push(operation.path);
   }
-  if (definition.state !== "unadopted") return actions;
-
-  if (definition.canonical !== null) {
-    const removes = definition.outputs.filter((entry) => entry.state === "unadopted").map((entry) => entry.path);
-    actions.push({
-      id: actionId(context.scope, `remove-redundant-${definition.kind}-${definition.name}`),
-      status: "planned",
-      description: `Remove redundant native ${definition.kind} '${definition.name}' after backup.`,
-      scope: definition.scope,
-      scopePath: definition.scopePath,
-      reads: [definition.canonical, ...removes],
-      removes,
-    });
-    return actions;
-  }
-
-  const canonicalDestination = definition.kind === "skill"
-    ? join(context.scope.canonical, "skills", definition.name)
-    : join(context.scope.canonical, "overlord", "agents", `${definition.name}.md`);
-  const writes = new Set<string>([canonicalDestination]);
-  if (definition.kind === "skill") writes.add(join(context.paths.claude.skills, definition.name));
-  else {
-    writes.add(expectedAgentPath(context, definition.name, "claude"));
-    writes.add(expectedAgentPath(context, definition.name, "codex"));
-  }
-  const removes = definition.outputs
-    .filter((entry) => definition.kind === "skill"
-      ? entry.target === "codex"
-      : !samePath(entry.path, expectedAgentPath(context, definition.name, entry.target)))
-    .map((entry) => entry.path);
-  actions.push({
-    id: actionId(context.scope, `adopt-${definition.kind}-${definition.name}`),
-    status: "planned",
-    description: `Adopt and replicate native ${definition.kind} '${definition.name}'.`,
-    scope: definition.scope,
-    scopePath: definition.scopePath,
-    reads: definition.outputs.map((entry) => entry.path),
-    writes: [...writes],
-    removes,
-  });
-  return actions;
+  if (writes.length === 0 && removes.length === 0) return undefined;
+  const reads = plan.sourcePath !== undefined
+    ? [plan.sourcePath]
+    : plan.sides.canonical.present
+      ? [plan.canonicalPath]
+      : [];
+  const action: ActionRecord = {
+    id: actionId(context.scope, `reconcile-${plan.kind}-${plan.name}`),
+    status,
+    description: `Reconcile ${plan.kind} '${plan.name}' from ${plan.source}.`,
+    scope: context.scope.type,
+    scopePath: context.scope.path,
+    reads,
+  };
+  if (writes.length > 0) action.writes = writes;
+  if (removes.length > 0) action.removes = removes;
+  return action;
 }
 
 async function inventoryScope(
@@ -759,29 +259,41 @@ async function inventoryScope(
   expectedPhysicalPath: string | undefined,
 ): Promise<ScopeContext> {
   const paths = resolveTargetPaths(scope, options);
-  for (const target of ["claude", "codex"] as const) {
-    const boundary = nativeBoundaryFor(scope, paths, target);
-    const expectedBoundary = expectedBoundaryIdentity(scope, boundary, expectedPhysicalPath);
-    await assertNoSymlinkedParent(join(paths[target].skills, ".overlord-inventory"), boundary, expectedBoundary);
-    await assertNoSymlinkedParent(join(paths[target].agents, ".overlord-inventory"), boundary, expectedBoundary);
-  }
+  const claudeBoundary = nativeBoundaryFor(scope, paths, "claude");
+  const expectedClaudeBoundary = expectedBoundaryIdentity(scope, claudeBoundary, expectedPhysicalPath);
+  await assertNoSymlinkedParent(join(paths.claude.skills, ".overlord-inventory"), claudeBoundary, expectedClaudeBoundary);
+  await assertNoSymlinkedParent(join(paths.claude.agents, ".overlord-inventory"), claudeBoundary, expectedClaudeBoundary);
+  const codexBoundary = nativeBoundaryFor(scope, paths, "codex");
+  await assertNoSymlinkedParent(
+    join(paths.codex.agents, ".overlord-inventory"),
+    codexBoundary,
+    expectedBoundaryIdentity(scope, codexBoundary, expectedPhysicalPath),
+  );
   const canonical = await loadCanonicalScope(scope.canonical);
   const diagnostics = canonical.diagnostics.map((entry): Diagnostic => ({ ...entry, scopePath: scope.path }));
-  const native = await scanNative(paths);
-  const { records, used } = await canonicalRecords(scope, canonical, native, paths);
-  records.push(...await nativeOnlyRecords(scope, native, used));
-  records.sort((left, right) => key(left.kind, left.name).localeCompare(key(right.kind, right.name)));
+  const native = await scanSupportedNative(paths);
+  const scopeIdentity = expectedPhysicalPath ?? await realpath(scope.path);
+  const ledger = await loadScopeLedger(join(options.home, ".agents"), scopeIdentity);
+  const plans = await buildReconciliationPlans({ scope, paths, canonical, native, ledger });
+  const records = plans.map((plan) => recordForPlan(scope, plan));
   const context: ScopeContext = {
     scope,
     expectedPhysicalPath,
+    scopeIdentity,
     paths,
+    ledger,
     canonical,
-    native,
     definitions: records,
+    plans,
     diagnostics,
     actions: [],
   };
-  if (!blocksMutation(context)) context.actions = records.flatMap((record) => plannedActions(context, record));
+  if (!blocksMutation(context)) {
+    context.actions = plans.flatMap((plan) => {
+      const action = reconciliationAction(context, plan, "planned");
+      return action === undefined ? [] : [action];
+    });
+  }
   return context;
 }
 
@@ -795,7 +307,6 @@ async function fleetDiscovery(options: EngineOptions): Promise<DiscoveryResult> 
   const userArtifactRoots = [
     { name: "Claude", path: userPaths.claude.skills },
     { name: "Claude", path: userPaths.claude.agents },
-    { name: "Codex", path: userPaths.codex.skills },
     { name: "Codex", path: userPaths.codex.agents },
   ];
   const overlapOwners = new Map<string, { names: Set<string>; paths: Set<string> }>();
@@ -844,12 +355,35 @@ async function fleetDiscovery(options: EngineOptions): Promise<DiscoveryResult> 
   }
   for (const scope of discovery.scopes) {
     const paths = resolveTargetPaths(scope, options);
+    const providerRoots = [
+      { label: "Claude root", path: dirname(paths.claude.skills) },
+      { label: "Codex root", path: dirname(paths.codex.agents) },
+    ];
+    for (const providerRoot of providerRoots) {
+      if (await pathsOverlap(scope.canonical, providerRoot.path, comparablePaths)) {
+        discovery.diagnostics.push(diagnostic(
+          "error",
+          "artifact-root-overlap",
+          `canonical root '${scope.canonical}' overlaps ${providerRoot.label} '${providerRoot.path}'.`,
+          providerRoot.path,
+          scope.path,
+        ));
+      }
+    }
+    if (await pathsOverlap(providerRoots[0]!.path, providerRoots[1]!.path, comparablePaths)) {
+      discovery.diagnostics.push(diagnostic(
+        "error",
+        "artifact-root-overlap",
+        `${providerRoots[0]!.label} '${providerRoots[0]!.path}' overlaps ${providerRoots[1]!.label} '${providerRoots[1]!.path}'.`,
+        providerRoots[0]!.path,
+        scope.path,
+      ));
+    }
     const artifactRoots = [
       { label: "canonical skills", path: join(scope.canonical, "skills") },
       { label: "canonical agents", path: join(scope.canonical, "overlord", "agents") },
       { label: "Claude skills", path: paths.claude.skills },
       { label: "Claude agents", path: paths.claude.agents },
-      { label: "Codex scan-only skills", path: paths.codex.skills },
       { label: "Codex agents", path: paths.codex.agents },
     ];
     let overlap: { left: typeof artifactRoots[number]; right: typeof artifactRoots[number] } | undefined;
@@ -879,7 +413,6 @@ async function fleetDiscovery(options: EngineOptions): Promise<DiscoveryResult> 
         join(scope.canonical, "overlord", "agents"),
         paths.claude.skills,
         paths.claude.agents,
-        paths.codex.skills,
         paths.codex.agents,
       ],
     };
@@ -947,16 +480,9 @@ export async function inspect(options: EngineOptions): Promise<OutputDocument> {
   return fleetDocument(options, "status");
 }
 
-function canonicalByKey(context: ScopeContext): Map<string, CanonicalSkill | CanonicalAgent> {
-  const definitions = new Map<string, CanonicalSkill | CanonicalAgent>();
-  for (const skill of context.canonical.skills) definitions.set(key("skill", skill.name), skill);
-  for (const agent of context.canonical.agents) definitions.set(key("agent", agent.name), agent);
-  return definitions;
-}
-
 function nativeBoundaryFor(scope: Scope, paths: TargetPaths, target: TargetName): string {
   if (scope.type === "project") return scope.path;
-  const nativeRoot = dirname(paths[target].skills);
+  const nativeRoot = target === "claude" ? dirname(paths.claude.skills) : dirname(paths.codex.agents);
   return dirname(nativeRoot);
 }
 
@@ -964,322 +490,120 @@ function nativeBoundary(context: ScopeContext, target: TargetName): string {
   return nativeBoundaryFor(context.scope, context.paths, target);
 }
 
-async function materialize(
-  context: ScopeContext,
-  definition: DefinitionRecord,
-  canonical: CanonicalSkill | CanonicalAgent,
-  nativeOutput: DefinitionOutput,
-  overwrite: boolean,
-): Promise<ActionRecord> {
-  const backups: string[] = [];
-  await assertContextParent(context, nativeOutput.path, nativeBoundary(context, nativeOutput.target));
-  if (definition.kind === "skill") {
-    if (nativeOutput.readsCanonicalDirectly === true) throw new Error("Codex canonical skills are never materialized.");
-    if (overwrite) throw new Error("Skill conflicts are never overwritten.");
-    try {
-      await copyDirectoryExclusive(canonical.path, nativeOutput.path);
-    } catch (error) {
-      const partialPaths = createdPaths(error);
-      if (partialPaths.length > 0) {
-        throw withCompletedActions(error, [{
-          id: actionId(context.scope, `partial-materialize-skill-${definition.name}-${nativeOutput.target}`),
-          status: "completed",
-          description: `Created a partial ${nativeOutput.target} skill '${definition.name}' before publication failed.`,
-          scope: definition.scope,
-          scopePath: definition.scopePath,
-          reads: [canonical.path],
-          writes: partialPaths,
-        }]);
-      }
-      throw error;
-    }
-  } else {
-    const agent = canonical as CanonicalAgent;
-    const rendered = nativeOutput.target === "claude" ? renderClaudeAgent(agent) : renderCodexAgent(agent);
-    try {
-      if (overwrite) {
-        backups.push(await replaceFileWithBackup(
-          nativeOutput.path,
-          rendered,
-          context.paths[nativeOutput.target].agents,
-        ));
-      }
-      else await writeFileAtomicExclusive(nativeOutput.path, rendered);
-    } catch (error) {
-      const failedBackups = [...backups, ...createdBackups(error)];
-      if (failedBackups.length > 0) {
-        throw withCompletedActions(error, [{
-          id: actionId(context.scope, `backup-before-failed-agent-${definition.name}-${nativeOutput.target}`),
-          status: "completed",
-          description: `Created a backup before replacing ${nativeOutput.target} agent '${definition.name}'.`,
-          scope: definition.scope,
-          scopePath: definition.scopePath,
-          reads: [nativeOutput.path],
-          writes: failedBackups,
-          backups: failedBackups,
-        }]);
-      }
-      throw error;
-    }
-  }
-  const action: ActionRecord = {
-    id: actionId(context.scope, `${overwrite ? "replace" : "materialize"}-${definition.kind}-${definition.name}-${nativeOutput.target}`),
-    status: "completed",
-    description: `${overwrite ? "Replaced" : "Materialized"} ${nativeOutput.target} ${definition.kind} '${definition.name}'.`,
-    scope: definition.scope,
-    scopePath: definition.scopePath,
-    reads: [canonical.path],
-    writes: [nativeOutput.path],
-  };
-  if (backups.length > 0) action.backups = backups;
-  return action;
-}
-
 function blocksMutation(context: ScopeContext): boolean {
   return context.diagnostics.some((entry) => entry.severity === "error")
-    || context.definitions.some((entry) => entry.canonical !== null && entry.state === "invalid");
+    || context.canonical.skills.some((entry) => !entry.valid)
+    || context.canonical.agents.some((entry) => !entry.valid)
+    || context.plans.some((plan) => plan.state === "invalid" && plan.sides.canonical.present);
 }
 
-async function materializeMissing(context: ScopeContext): Promise<ActionRecord[]> {
-  const canonical = canonicalByKey(context);
-  const actions: ActionRecord[] = [];
-  try {
-    for (const record of context.definitions) {
-      if (record.canonical === null || record.state === "invalid") continue;
-      const definition = canonical.get(key(record.kind, record.name));
-      if (definition === undefined || !definition.valid) continue;
-      for (const nativeOutput of record.outputs) {
-        if (nativeOutput.state === "missing") {
-          actions.push(await materialize(context, record, definition, nativeOutput, false));
-        }
-      }
-    }
-  } catch (error) {
-    throw withCompletedActions(error, actions);
+async function writeCanonicalFromPlan(context: ScopeContext, plan: ReconciliationPlan): Promise<void> {
+  await assertContextParent(context, plan.canonicalPath, context.scope.path);
+  if (plan.kind === "skill") {
+    if (plan.sourcePath === undefined) throw new Error(`Skill '${plan.name}' has no provider source to import.`);
+    if (await pathExists(plan.canonicalPath)) await replaceDirectoryAtomic(plan.sourcePath, plan.canonicalPath);
+    else await copyDirectoryExclusive(plan.sourcePath, plan.canonicalPath);
+    return;
   }
-  return actions;
+  if (plan.desiredAgent === undefined) throw new Error(`Agent '${plan.name}' has no provider source to import.`);
+  const source = renderCanonicalAgent({ ...plan.desiredAgent, path: plan.canonicalPath });
+  if (await pathExists(plan.canonicalPath)) await replaceFileAtomic(plan.canonicalPath, source);
+  else await writeFileAtomicExclusive(plan.canonicalPath, source);
 }
 
-function nativeForRecord(context: ScopeContext, definition: DefinitionRecord): NativeDefinition[] {
-  const paths = new Set(definition.outputs.map((entry) => filesystemComparisonPath(entry.path)));
-  return context.native.filter((entry) => paths.has(filesystemComparisonPath(entry.path)));
+async function removeCanonicalFromPlan(context: ScopeContext, plan: ReconciliationPlan): Promise<void> {
+  await assertContextParent(context, plan.canonicalPath, context.scope.path);
+  await removePhysicalArtifact(plan.canonicalPath, plan.kind === "skill" ? "directory" : "file");
 }
 
-function mergedNativeAgent(entries: NativeDefinition[]): CanonicalAgent {
-  const source = entries[0];
-  if (source?.agent === undefined) throw new Error("Native agent is invalid and cannot be adopted.");
-  const targets: CanonicalAgent["targets"] = { claude: {}, codex: {} };
-  for (const entry of entries) {
-    if (entry.agent !== undefined) targets[entry.target] = entry.agent.targets[entry.target];
-  }
-  return { ...source.agent, targets, valid: true };
+async function canonicalAgentAfterMutation(context: ScopeContext, plan: ReconciliationPlan): Promise<CanonicalAgent> {
+  if (plan.desiredAgent !== undefined) return { ...plan.desiredAgent, path: plan.canonicalPath };
+  const canonical = plan.canonical;
+  if (canonical !== undefined && plan.kind === "agent") return canonical as CanonicalAgent;
+  const reloaded = await loadCanonicalScope(context.scope.canonical);
+  const agent = reloaded.agents.find((entry) => entry.name === plan.name);
+  if (agent === undefined || !agent.valid) throw new Error(`Canonical agent '${plan.name}' is unavailable after reconciliation.`);
+  return agent;
 }
 
-async function installCanonicalAgent(context: ScopeContext, agent: CanonicalAgent): Promise<ActionRecord> {
-  const path = join(context.scope.canonical, "overlord", "agents", `${agent.name}.md`);
-  await assertContextParent(context, path, context.scope.path);
-  await writeFileAtomicExclusive(path, renderCanonicalAgent({ ...agent, path }));
-  return {
-    id: actionId(context.scope, `adopt-agent-${agent.name}`),
-    status: "completed",
-    description: `Adopted canonical agent '${agent.name}'.`,
-    scope: context.scope.type,
-    scopePath: context.scope.path,
-    reads: [agent.path],
-    writes: [path],
-  };
-}
-
-async function installCanonicalSkill(context: ScopeContext, source: NativeDefinition): Promise<ActionRecord> {
-  const destination = join(context.scope.canonical, "skills", source.name);
-  await assertContextParent(context, destination, context.scope.path);
-  if (source.scanOnly === true) await assertContextParent(context, source.path, nativeBoundary(context, source.target));
-  const verifiedSource = await realpath(source.path);
-  const backups: string[] = [];
-  let installed = false;
-  try {
-    await copyDirectoryExclusive(verifiedSource, destination);
-    installed = true;
-    if (source.scanOnly === true) {
-      const comparison = await compareDirectories(destination, verifiedSource);
-      if (!comparison.equal) throw new Error(`Adoption verification failed: ${comparison.evidence ?? "directory differs"}`);
-      backups.push(await removeWithBackup(source.path, context.paths[source.target].skills));
-    }
-  } catch (error) {
-    const completed: ActionRecord[] = [];
-    if (installed || createdPaths(error).includes(destination)) {
-      completed.push({
-        id: actionId(context.scope, `partial-adopt-skill-${source.name}`),
-        status: "completed",
-        description: `Installed canonical skill '${source.name}' before cleanup failed.`,
-        scope: context.scope.type,
-        scopePath: context.scope.path,
-        reads: [source.path],
-        writes: [destination],
-      });
-    }
-    const failedBackups = createdBackups(error);
-    if (failedBackups.length > 0) {
-      completed.push({
-        id: actionId(context.scope, `backup-before-failed-remove-skill-${source.name}`),
-        status: "completed",
-        description: `Created a backup before cleanup of scan-only skill '${source.name}' failed.`,
-        scope: context.scope.type,
-        scopePath: context.scope.path,
-        reads: [source.path],
-        writes: failedBackups,
-        backups: failedBackups,
-      });
-    }
-    throw withCompletedActions(error, completed);
-  }
-  const action: ActionRecord = {
-    id: actionId(context.scope, `adopt-skill-${source.name}`),
-    status: "completed",
-    description: `Adopted canonical skill '${source.name}'.`,
-    scope: context.scope.type,
-    scopePath: context.scope.path,
-    reads: [source.path],
-    writes: [destination],
-  };
-  if (source.scanOnly === true) action.removes = [source.path];
-  if (backups.length > 0) action.backups = backups;
-  return action;
-}
-
-async function removeWithRecordedBackup(
+async function executeProviderOperation(
   context: ScopeContext,
-  definition: DefinitionRecord,
-  entry: NativeDefinition,
-  description: string,
-): Promise<ActionRecord> {
-  await assertContextParent(context, entry.path, nativeBoundary(context, entry.target));
-  let backup: string;
-  try {
-    const artifactRoot = entry.kind === "skill"
-      ? context.paths[entry.target].skills
-      : context.paths[entry.target].agents;
-    backup = await removeWithBackup(entry.path, artifactRoot);
-  } catch (error) {
-    const failedBackups = createdBackups(error);
-    if (failedBackups.length > 0) {
-      throw withCompletedActions(error, [{
-        id: actionId(context.scope, `backup-before-failed-remove-${definition.kind}-${definition.name}-${entry.target}`),
-        status: "completed",
-        description: `Created a backup before removing ${entry.target} ${definition.kind} '${definition.name}' failed.`,
-        scope: context.scope.type,
-        scopePath: context.scope.path,
-        reads: [entry.path],
-        writes: failedBackups,
-        backups: failedBackups,
-      }]);
-    }
-    throw error;
+  plan: ReconciliationPlan,
+  operation: ReconciliationPlan["providerOperations"][number],
+): Promise<void> {
+  const boundary = nativeBoundary(context, operation.target);
+  await assertContextParent(context, operation.path, boundary);
+  if (operation.operation === "remove") {
+    await removePhysicalArtifact(operation.path, plan.kind === "skill" ? "directory" : "file");
+    return;
   }
-  return {
-    id: actionId(context.scope, `remove-${definition.kind}-${definition.name}-${entry.target}`),
-    status: "completed",
-    description,
-    scope: context.scope.type,
-    scopePath: context.scope.path,
-    reads: [entry.path],
-    removes: [entry.path],
-    backups: [backup],
-  };
+  if (plan.kind === "skill") {
+    if (await pathExists(operation.path)) await replaceDirectoryAtomic(plan.canonicalPath, operation.path);
+    else await copyDirectoryExclusive(plan.canonicalPath, operation.path);
+    return;
+  }
+  const agent = await canonicalAgentAfterMutation(context, plan);
+  const rendered = operation.target === "claude" ? renderClaudeAgent(agent) : renderCodexAgent(agent);
+  if (await pathExists(operation.path)) await replaceFileAtomic(operation.path, rendered);
+  else await writeFileAtomicExclusive(operation.path, rendered);
 }
 
-async function convergeAdopted(
-  originalContext: ScopeContext,
+function userCanonicalRoot(options: EngineOptions): string {
+  return join(options.home, ".agents");
+}
+
+async function persistConvergedPlan(
+  context: ScopeContext,
+  plan: ReconciliationPlan,
   options: EngineOptions,
-  kind: ArtifactKind,
-  name: string,
-): Promise<ActionRecord[]> {
-  const context = await inventoryScope(
-    originalContext.scope,
-    options,
-    originalContext.expectedPhysicalPath,
-  );
-  const record = context.definitions.find((entry) => entry.kind === kind && entry.name === name && entry.canonical !== null);
-  const canonical = canonicalByKey(context).get(key(kind, name));
-  if (record === undefined || canonical === undefined || !canonical.valid) return [];
-  const actions: ActionRecord[] = [];
-  try {
-    for (const nativeOutput of record.outputs) {
-      if (nativeOutput.readsCanonicalDirectly === true) continue;
-      const entry = nativeAt(context.native, nativeOutput.path);
-      if (kind === "skill" && nativeOutput.target === "codex" && entry?.scanOnly === true) {
-        actions.push(await removeWithRecordedBackup(
-          context,
-          record,
-          entry,
-          `Removed redundant Codex skill '${name}' after adoption.`,
-        ));
-        continue;
-      }
-      if (kind === "agent" && !samePath(nativeOutput.path, expectedAgentPath(context, name, nativeOutput.target))) {
-        if (entry !== undefined) {
-          actions.push(await removeWithRecordedBackup(
-            context,
-            record,
-            entry,
-            `Removed duplicate ${nativeOutput.target} agent '${name}' after adoption.`,
-          ));
-        }
-        continue;
-      }
-      if (nativeOutput.state === "missing") actions.push(await materialize(context, record, canonical, nativeOutput, false));
-      else if (kind === "agent" && nativeOutput.state === "conflict") {
-        actions.push(await materialize(context, record, canonical, nativeOutput, true));
-      }
-    }
-  } catch (error) {
-    throw withCompletedActions(error, actions);
+): Promise<void> {
+  const ledgerKey = { scopeIdentity: context.scopeIdentity, kind: plan.kind, name: plan.name } as const;
+  if (plan.source === "delete") {
+    deleteLedgerEntry(context.ledger, ledgerKey);
+    await saveScopeLedger(userCanonicalRoot(options), context.ledger);
+    return;
   }
-  return actions;
+  if (!(await pathExists(plan.canonicalPath))) return;
+  const receipts: LedgerEntry["receipts"] = {
+    canonical: {
+      path: plan.canonicalPath,
+      digest: await (plan.kind === "skill" ? digestSkillTree(plan.canonicalPath) : digestFile(plan.canonicalPath)),
+    },
+  };
+  if (plan.kind === "skill") {
+    const claudePath = plan.sides.claude.path;
+    if (!(await pathExists(claudePath)) || !(await compareDirectories(plan.canonicalPath, claudePath)).equal) return;
+    receipts.claude = { path: claudePath, digest: await digestSkillTree(claudePath) };
+    setLedgerEntry(context.ledger, ledgerKey, { receipts });
+  } else {
+    const agent = await canonicalAgentAfterMutation(context, plan);
+    for (const target of ["claude", "codex"] as const) {
+      if (agent.targets[target] === false) continue;
+      const path = plan.sides[target].path;
+      if (!(await pathExists(path))) return;
+      const expected = target === "claude" ? renderClaudeAgent(agent) : renderCodexAgent(agent);
+      if (await readFile(path, "utf8") !== expected) return;
+      receipts[target] = { path, digest: await digestFile(path) };
+    }
+    setLedgerEntry(context.ledger, ledgerKey, {
+      receipts,
+      canonicalSource: await readFile(plan.canonicalPath, "utf8"),
+    });
+  }
+  await saveScopeLedger(userCanonicalRoot(options), context.ledger);
 }
 
-async function adoptNativeOnly(
+async function executeReconciliationPlan(
   context: ScopeContext,
-  definition: DefinitionRecord,
+  plan: ReconciliationPlan,
   options: EngineOptions,
-): Promise<ActionRecord[]> {
-  const entries = nativeForRecord(context, definition);
-  if (entries.length === 0 || entries.some((entry) => !entry.valid)) return [];
-  const actions: ActionRecord[] = [];
-  try {
-    if (definition.kind === "skill") {
-      const source = entries.find((entry) => entry.target === "claude") ?? entries[0]!;
-      actions.push(await installCanonicalSkill(context, source));
-    } else {
-      actions.push(await installCanonicalAgent(context, mergedNativeAgent(entries)));
-    }
-    actions.push(...await convergeAdopted(context, options, definition.kind, definition.name));
-  } catch (error) {
-    throw withCompletedActions(error, actions);
-  }
-  return actions;
-}
-
-async function removeRedundantCanonicalOutputs(
-  context: ScopeContext,
-  definition: DefinitionRecord,
-): Promise<ActionRecord[]> {
-  const entries = nativeForRecord(context, definition);
-  const actions: ActionRecord[] = [];
-  try {
-    for (const entry of entries) {
-      if (entry.kind !== "skill" || entry.scanOnly !== true) continue;
-      actions.push(await removeWithRecordedBackup(
-        context,
-        definition,
-        entry,
-        `Removed redundant Codex skill '${definition.name}'.`,
-      ));
-    }
-  } catch (error) {
-    throw withCompletedActions(error, actions);
-  }
-  return actions;
+): Promise<ActionRecord | undefined> {
+  if (plan.source === "invalid" || (plan.source === "conflict" && plan.providerOperations.length === 0)) return undefined;
+  if (plan.canonicalOperation === "write") await writeCanonicalFromPlan(context, plan);
+  else if (plan.canonicalOperation === "remove") await removeCanonicalFromPlan(context, plan);
+  for (const operation of plan.providerOperations) await executeProviderOperation(context, plan, operation);
+  if (plan.source !== "conflict") await persistConvergedPlan(context, plan, options);
+  return reconciliationAction(context, plan, "completed");
 }
 
 async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPhysicalPath: string | undefined): Promise<ActionRecord[]> {
@@ -1291,20 +615,13 @@ async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPh
   let failure: unknown;
   try {
     await assertScopeIdentity(scope, expectedPhysicalPath);
-    let context = await inventoryScope(scope, options, expectedPhysicalPath);
+    const context = await inventoryScope(scope, options, expectedPhysicalPath);
     if (!blocksMutation(context)) {
-      actions.push(...await materializeMissing(context));
-      context = await inventoryScope(scope, options, expectedPhysicalPath);
-      const pending = context.definitions.filter((entry) => entry.state === "unadopted");
-      for (const definition of pending) {
-        context = await inventoryScope(scope, options, expectedPhysicalPath);
-        const current = context.definitions.find((entry) => entry.kind === definition.kind && entry.name === definition.name);
-        if (current?.state !== "unadopted") continue;
-        if (current.canonical === null) actions.push(...await adoptNativeOnly(context, current, options));
-        else actions.push(...await removeRedundantCanonicalOutputs(context, current));
+      for (const plan of context.plans) {
+        const action = await executeReconciliationPlan(context, plan, options);
+        if (action !== undefined) actions.push(action);
+        else if (plan.canRecordBaseline) await persistConvergedPlan(context, plan, options);
       }
-      context = await inventoryScope(scope, options, expectedPhysicalPath);
-      actions.push(...await materializeMissing(context));
     }
   } catch (error) {
     failure = error;

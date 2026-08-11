@@ -236,7 +236,7 @@ describe("fleet inventory and synchronization", () => {
     expect(await readFile(nativePath, "utf8")).toBe(nativeSkill);
   });
 
-  it("automatically adopts a unique Claude skill", async () => {
+  it("imports a unique Claude skill", async () => {
     const { discoveryRoot, options } = await fixture();
     const project = join(discoveryRoot, "claude-native");
     const native = join(project, ".claude/skills/verify-build/SKILL.md");
@@ -255,7 +255,7 @@ describe("fleet inventory and synchronization", () => {
     }));
   });
 
-  it("automatically adopts a native agent while preserving its provider overlay", async () => {
+  it("imports a native agent while preserving its provider overlay", async () => {
     const { discoveryRoot, options } = await fixture();
     const project = join(discoveryRoot, "native-agent");
     const native = `---

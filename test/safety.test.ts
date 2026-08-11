@@ -262,7 +262,7 @@ describe("fleet safety contracts", () => {
     expect(await readFile(codexPath, "utf8")).toContain('name = "reviewer"');
   });
 
-  it("refuses adoption through a symlinked canonical root", async () => {
+  it("refuses provider import through a symlinked canonical root", async () => {
     const { home, fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const outside = join(home, "outside-canonical");
@@ -312,7 +312,7 @@ describe("fleet safety contracts", () => {
     expect(result.actions?.filter((action) => action.scopePath === project)).toEqual([]);
   });
 
-  it("does not inventory or adopt agents through a symlinked provider root", async () => {
+  it("does not inventory or import agents through a symlinked provider root", async () => {
     const { home, fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const outside = join(home, "outside-agents");
@@ -473,7 +473,7 @@ describe("fleet safety contracts", () => {
   });
 
   it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
-    "reports an unreadable native skill payload before adoption",
+    "reports an unreadable native skill payload before import",
     async () => {
       const { fleetRoot, options } = await fleetFixture();
       const project = join(fleetRoot, "project");
@@ -498,7 +498,7 @@ describe("fleet safety contracts", () => {
     },
   );
 
-  it("does not adopt a native skill whose internal symlink chain physically escapes", async () => {
+  it("does not import a native skill whose internal symlink chain physically escapes", async () => {
     const { fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const skills = join(project, ".claude/skills");
@@ -519,7 +519,7 @@ describe("fleet safety contracts", () => {
     await expect(lstat(join(project, ".agents/skills/escape"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("does not adopt a native-only skill symlink from outside its scope", async () => {
+  it("does not import a native-only skill symlink from outside its scope", async () => {
     const { home, fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const outside = join(home, "outside-skill");
@@ -540,7 +540,7 @@ describe("fleet safety contracts", () => {
     expect(await readlink(native)).toBe(outside);
   });
 
-  it("does not adopt a native-only agent symlink from outside its scope", async () => {
+  it("does not import a native-only agent symlink from outside its scope", async () => {
     const { home, fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const outside = join(home, "outside-agent.md");
@@ -561,7 +561,7 @@ describe("fleet safety contracts", () => {
     expect(await readlink(native)).toBe(outside);
   });
 
-  it("preserves an adopted native agent when atomic displacement fails", async () => {
+  it("preserves a provider-native agent when atomic replacement fails", async () => {
     const { fleetRoot, options } = await fleetFixture();
     const project = join(fleetRoot, "project");
     const native = join(project, ".claude/agents/reviewer.md");
@@ -575,10 +575,7 @@ describe("fleet safety contracts", () => {
     } finally {
       await chmod(join(project, ".claude/agents"), 0o755);
     }
-    const backedUp = result.actions?.find((action) => (action.backups?.length ?? 0) > 0);
-
     expect(scopeDiagnostic(result, project)).toBeDefined();
-    expect(backedUp).toBeUndefined();
     expect(await readFile(native, "utf8")).toBe(source);
   });
 
