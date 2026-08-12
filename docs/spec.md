@@ -1,6 +1,6 @@
-# Overlord v0.2 specification
+# Overlord specification
 
-Status: normative for Overlord 0.2.
+Status: normative for the current source tree.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY describe requirements on conforming implementations.
 
@@ -8,7 +8,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY describe requirements 
 
 Overlord keeps filesystem-backed Claude Code and Codex skills and custom agents synchronized through one durable `.agents` source in the user scope and in every discovered project. Intentional edits SHOULD target `.agents`, but provider-native files are tracked endpoints because a provider may create, modify, or delete them while helping the user. After every successful reconciliation, `.agents` contains the resulting canonical definition for that scope.
 
-Every status, check, and sync invocation operates on the same fleet regardless of the process working directory: the user scope plus independent project scopes found below configured discovery roots.
+Every status, check, and sync invocation, including each synchronization cycle started by `watch` directly or by a managed user service, operates on the same fleet regardless of the process working directory: the user scope plus independent project scopes found below configured discovery roots.
 
 Overlord is a filesystem reconciler and maintains Git history for the user source at `~/.agents`. It is not an agent runtime, provider launcher, project registry, or source-control manager for project repositories.
 
@@ -24,7 +24,7 @@ roots:
   - /absolute/path/to/another-parent
 ```
 
-`roots` MUST be an array; unknown keys MUST make the configuration invalid. The configuration has no version field. Breaking configuration changes MUST be documented when they are introduced.
+`roots` MUST be an array; unknown keys MUST make the configuration invalid. The configuration has no version field. Only this current, roots-only shape is accepted. Overlord MUST NOT infer, translate, or rewrite an earlier configuration shape automatically; the user must migrate unsupported configuration explicitly. Breaking configuration changes MUST be documented when they are introduced.
 
 Each root MUST be an absolute path or start with `~/`; a `~/` root MUST be expanded against the home directory, every result MUST be normalized, and duplicate normalized paths MUST be removed while preserving first occurrence order.
 
@@ -201,6 +201,8 @@ Deletion competing with modification or with a different deletion state MUST be 
 
 Absence without a last-synchronized receipt, including a missing output in a newly discovered scope, MUST NOT be inferred as deletion. Existing valid content MUST be materialized to the absent endpoint.
 
+Within `watch`, a planned removal action MUST NOT execute on its first observation. Overlord MUST retain that action's complete scope, definition, read, write, and removal path identity, wait at least two seconds, and perform a second full inventory and reconciliation cycle. The removal MAY proceed only when the second cycle contains the same action identity. A changed, missing, or no-longer-planned action MUST invalidate its prior confirmation and begin a new grace period if a removal remains planned. Each additional removal action requires its own confirmation. Safe non-removal work MAY proceed while removal confirmation is pending.
+
 ## 10. Commands
 
 The command family is:
@@ -210,11 +212,20 @@ overlord init
 overlord status
 overlord check
 overlord sync
+overlord watch
+overlord service install [--dry-run]
+overlord service status
+overlord service logs
+overlord service uninstall
 ```
 
-`init` MUST create the user canonical root when needed and create or validate a dedicated physical Git repository rooted exactly there. It MUST reject unsupported `.git` files or symlinks and repositories whose work-tree top level is elsewhere. It MUST create a minimal `roots: []` configuration when absent, install the bundled Overlord skill when absent, commit the initial managed canonical state with the fixed subject `overlord: initialize`, and initialize the private synchronization ledger below `.git`. A repeated no-op `init` MUST NOT create another commit.
+`init` MUST validate any existing fleet configuration in its current roots-only format before it creates or validates the dedicated user Git repository or performs another initialization write. An invalid or unsupported configuration MUST fail initialization without creating `~/.agents/.git`, rewriting the configuration, or attempting an automatic migration.
 
-`status`, `check`, and `sync` MUST require an existing dedicated user repository. `init` is the normal way to establish it, but a valid manually initialized repository, including an unborn repository, is accepted without a hidden initialization marker. Before fleet discovery the commands MUST validate the repository without creating the canonical root, `.git`, a commit, or ledger state. An absent or invalid repository MUST fail as a top-level permission error.
+After that validation, `init` MUST create the user canonical root when needed and create or validate a dedicated physical Git repository rooted exactly there. It MUST reject unsupported `.git` files or symlinks and repositories whose work-tree top level is elsewhere. It MUST create a minimal `roots: []` configuration when absent, install the bundled Overlord skill when absent, commit the initial managed canonical state with the fixed subject `overlord: initialize`, and initialize the private synchronization ledger below `.git`. On first initialization, the managed capture MUST include existing physical user canonical sources below `~/.agents/skills` and `~/.agents/overlord/agents`, rather than only files created by `init`; content already represented by the repository's `HEAD` need not be recommitted. A repeated no-op `init` MUST NOT create another commit.
+
+`init` MUST NOT overwrite an existing physical `~/.agents/skills/overlord/SKILL.md` whose bytes differ from the bundled skill; it MUST preserve that file and report a warning. Initialization MUST NOT copy provider-native definitions into canonical source, migrate an earlier layout, or resolve definition conflicts. Later `sync` and `watch` cycles MUST continue to leave genuine conflicts untouched under sections 7 through 9 rather than choose a side automatically.
+
+`status`, `check`, `sync`, and `watch` MUST require an existing dedicated user repository. `init` is the normal way to establish it, but a valid manually initialized repository, including an unborn repository, is accepted without a hidden initialization marker. Before fleet discovery the commands MUST validate the repository without creating the canonical root, `.git`, a commit, or ledger state. An absent or invalid repository MUST fail as a top-level permission error.
 
 `status` MUST discover and inspect the complete fleet without mutation and MUST report attention while still exiting successfully after a completed inspection. It MUST NOT stage or commit files or create or update ledger state.
 
@@ -226,7 +237,43 @@ For the user scope, `sync` MUST apply every safe canonical write and deletion fo
 
 User provider propagation MUST begin only after that commit succeeds or Git establishes that the selected canonical paths are already clean. If the user commit fails, `sync` MUST stop before distributing those uncommitted canonical changes or advancing their ledger receipts; the canonical working-tree changes MUST remain visible for diagnosis and retry. Project canonical changes MUST be reconciled without invoking Git in the project repository, regardless of whether a project repository exists.
 
-The only operational output option is `--json`; `--help` and `--version` are informational, and a command is required.
+On an existing machine, `watch` SHOULD begin only after the operator has established a clean or explicitly understood baseline: `init` has completed, `status` has been reviewed, and an intentional foreground `sync` has either reached `ok` or left only attention states the operator understands. `watch` is continuous reconciliation, not an unattended migration or conflict-resolution command.
+
+`watch` MUST run as a foreground macOS or Linux process and MUST begin with a complete fleet synchronization cycle. After each cycle it MUST refresh filesystem watchers for the exact managed canonical and provider artifact roots of the user scope and every discovered project scope. It MUST also observe the user fleet configuration so a configuration edit can refresh discovery. It MUST NOT recursively watch a configured discovery root, an entire project tree, or the complete user `.agents` repository as a substitute for those exact roots. When an exact managed root is absent, a watcher MAY observe its nearest existing physical parent only to detect creation of that root and MUST ignore unrelated paths.
+
+Filesystem events MUST be treated only as invalidation hints. Events MUST use a 750 millisecond quiet-period debounce and then start a complete fleet synchronization cycle. Only one cycle MAY run at a time; an event received during a cycle MUST request one subsequent cycle rather than start concurrent reconciliation.
+
+Independently of filesystem events, `watch` MUST start a complete fleet discovery and synchronization cycle every 30 seconds. This periodic cycle MUST discover newly populated projects, recover from missed events, and refresh the exact managed-root watch set.
+
+On `SIGINT` or `SIGTERM`, `watch` MUST stop accepting new cycles, cancel its timers, close its filesystem watchers, allow any active cycle to settle safely, and then exit. The foreground command itself MUST NOT install, enable, or manage a launchd agent, systemd unit, or other background service.
+
+Every `watch` process MUST acquire one lifetime lock derived from the absolute home-scoped pseudo-identity `<home>/.agents/.git/overlord/watch-lifetime` before its initial synchronization and MUST hold that lock through shutdown. Lock contention MUST prevent a second foreground, tmux-hosted, or service-managed watcher from reconciling the same home identity. On macOS and Linux, its exact layout MUST be `/tmp/overlord-locks-uid-<uid>/<24-hex-digest>.lock`, where the digest is the first 24 hex characters of SHA-256 over the pseudo-identity's real path when it exists or its normalized absolute path otherwise. The location MUST NOT depend on `TMPDIR` or another inherited environment value. The per-UID root MUST be a physical current-user-owned directory with no group or world permissions; the `.lock` entry MUST be a directory containing its owner PID. This fleet-wide lifetime lock is separate from the shorter per-scope mutation locks.
+
+The `service` command family MUST be supported only on macOS and Linux, MUST reject execution as root, and MUST manage only the current user's service. It is a platform adapter around the same foreground `watch` process, not a second reconciliation engine. macOS MUST use the per-user LaunchAgent label `io.github.geekforbrains.overlord.watch` at `~/Library/LaunchAgents/io.github.geekforbrains.overlord.watch.plist`. Linux MUST use the user unit `overlord-watch.service` below the resolved absolute `XDG_CONFIG_HOME/systemd/user`, defaulting to `~/.config/systemd/user`. No service command MAY install a root LaunchDaemon or system unit.
+
+Before `service install` writes a definition or invokes a manager, it MUST perform the same read-only fleet inspection as `check` and require an `ok` baseline with no unresolved conflict, invalid definition, diagnostic requiring attention, or planned reconciliation action. Installation MUST NOT initialize the user repository, migrate configuration, synchronize a proposed action, or resolve a conflict. Both ordinary and `--dry-run` installation MUST print the exact platform manager and service identifier; definition, receipt, and log locations; physical absolute Node and Git executables; physical absolute CLI path and arguments; complete allowlisted environment; rendered manager definition; and manager commands before any mutation. `--dry-run` MUST stop after that preview without writing a file or invoking the service manager.
+
+The service MUST invoke the pinned Node executable and CLI directly without a login shell or executable search. Installation MUST resolve the physical Git executable used for fleet history operations, serialize it as `OVERLORD_GIT_EXECUTABLE`, and the watcher MUST use that absolute executable for Git operations. The only serialized environment variables MUST be `HOME`, `PATH`, `OVERLORD_GIT_EXECUTABLE`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `OVERLORD_SERVICE`, and `OVERLORD_SERVICE_VERSION`. Provider and XDG paths MUST be explicit absolute paths, with a relative operator-supplied value resolved against home. `PATH` MUST be deterministic and contain only the pinned Node and Git executable directories plus `/usr/bin`, `/bin`, `/usr/sbin`, and `/sbin`; inherited shell, IDE, and agent-wrapper entries MUST NOT be retained. No other inherited environment variable or secret MAY be copied into the definition or ownership receipt.
+
+Installation MUST pin the physical absolute Node and CLI files used for that invocation and record the resolved physical Git executable. A runtime or checkout relocation MUST require an explicit subsequent `service install`; a generated definition MUST NOT silently follow a moved symlink or search a newer runtime. Reinstallation MAY update a stale service only when an intact Overlord receipt proves ownership and the installed definition still matches its recorded digest.
+
+The generated manager definition and versioned ownership receipt MUST be physical, atomically published current-user-owned mode `0600` files, Overlord-created state directories MUST be private, and symlinked parents below each trusted service-path boundary MUST be refused. The macOS receipt MUST be `~/Library/Application Support/Overlord/service.json`; the Linux receipt MUST be `overlord/service.json` below the resolved absolute `XDG_STATE_HOME`, defaulting to `~/.local/state`. A receipt MUST record the platform, service identifier, definition path and digest, Node and Git executables, CLI arguments, allowlisted environment, Overlord version, and receipt format version, plus platform log paths where applicable. Before trusting its digest, Overlord MUST reconstruct the receipt-described definition using that format version's rendering semantics and require the metadata, environment, arguments, service identity, and reconstructed digest to be coherent. A definition without a matching receipt, a manager identity loaded or enabled without its matching owned definition and receipt, an invalid or mismatched receipt, a missing owned definition, or a definition whose current digest differs from the receipt MUST be reported without replacement or removal. Install and uninstall MUST have no force or automatic-adoption path for such a collision or modification.
+
+New receipts MUST use format version 2. A coherent format version 1 receipt whose installed definition still matches its recorded digest MUST remain recognized as owned. It MUST be classified as stale when its historical rendering differs from the current desired definition and MAY remain current when the bytes are identical. `service status` MUST report that state without mutation. An explicit `service install` MUST replace a stale legacy definition and receipt with the current version 2 forms; an unchanged healthy current installation MUST remain a no-op and need not rewrite an otherwise coherent receipt solely to change its format number. `service uninstall` MAY remove the unchanged owned version 1 pair without first upgrading it. An unsupported receipt version or incoherent legacy receipt MUST be classified as modified and MUST be refused. Receipt reconstruction MUST preserve the historical version 1 rendering rules, including a 120-second launchd `ExitTimeOut`, while the current version 2 launchd definition uses 60 seconds.
+
+A successful install MUST enable and start the service, and an unchanged healthy repeated install MUST be a no-op. The generated macOS job MUST set launchd `ExitTimeOut` to 60 seconds, and the Linux unit MUST set systemd `TimeoutStopSec` to 120 seconds; shutdown settling remains bounded by the manager's effective timeout. A launchd `bootstrap` failure matching `Bootstrap failed: 5: Input/output error` MAY be retried after 100, 250, and 500 milliseconds, for at most four total attempts including the initial attempt. No other activation error MAY use this retry, and exhaustion MUST fail the operation rather than retry indefinitely. After a successful launchd `bootout` during an owned update or uninstall, Overlord MUST keep the existing definition and receipt intact while it polls manager state until the job is neither loaded nor active. That polling MUST have a total budget shorter than the 60-second `ExitTimeOut`; no fixed convergence time within the budget is promised. Manager unreachability or failure to converge within the bound MUST fail before those ownership files are replaced or removed. Install and uninstall MUST serialize service lifecycle mutations for one home and refuse filesystem mutation when the current user's service manager is unreachable. If an install, update, activation, or uninstall fails after mutation starts, Overlord MUST make a best-effort rollback to the exact prior owned definition, receipt, enablement, loaded, and active state without overwriting a concurrent external edit.
+
+`service status` MUST be read-only and MUST report absent, current, stale, externally modified, and colliding definition states together with the pinned runtime and reachable, loaded, active, and enabled manager state where the platform exposes those distinctions. An active manager process alone MUST NOT be reported as healthy when ownership or runtime state is stale or modified.
+
+When `watch` detects the explicit service environment marker, every emitted watcher line MUST begin with an ISO 8601 timestamp. A healthy periodic-scan cycle with no completed action, non-informational diagnostic, or pending removal MUST produce no output; startup, shutdown, actions, attention, retries, and errors MUST remain reportable. macOS standard output and error MUST append to `~/Library/Logs/Overlord/watch.log` and `watch-error.log`; Linux output MUST use the current user's systemd journal.
+
+`service logs` MUST return a bounded, non-following view. On macOS it MUST read no more than the most recent 64 KiB from each physical log file. On Linux it MUST request no more than the most recent 200 lines for `overlord-watch.service` from the user journal without a pager. The command MUST refuse a symlink or non-file macOS log path.
+
+`service uninstall` MUST stop and remove only the unchanged Overlord-owned service definition and receipt and MUST disable the Linux user unit. It MUST preserve every canonical and provider definition, fleet configuration, reconciliation ledger and Git record, project file, and service log. It MUST NOT remove or enable Linux linger, change another user-manager policy, or delete a colliding or modified service file.
+
+The macOS LaunchAgent follows the logged-in user's launchd lifecycle. The Linux unit follows the existing user systemd manager policy; installation and uninstall MUST NOT invoke `loginctl enable-linger` or `disable-linger`. Service availability before login or after the final logout is therefore outside Overlord's guarantee.
+
+The only operational output option for the one-shot `init`, `status`, `check`, and `sync` commands is `--json`. `watch` and every `service` subcommand MUST reject `--json`; the watcher has human-readable output but no streaming JSON contract, and the service-management surface is intentionally human-only. `--dry-run` MUST be accepted only by `service install`. `--help` and `--version` are informational, and a command is required.
 
 Human output MUST identify each scope and group definitions by absolute scope path.
 
@@ -243,7 +290,7 @@ Scope-local synchronization failures SHOULD become scoped error diagnostics so h
 
 ## 12. JSON output schema v2
 
-`--json` MUST emit exactly one JSON document to standard output on success or failure and MUST conform to `docs/schemas/output.schema.json` with `schemaVersion: 2`.
+For the one-shot `init`, `status`, `check`, and `sync` commands, `--json` MUST emit exactly one JSON document to standard output on success or failure and MUST conform to `docs/schemas/output.schema.json` with `schemaVersion: 2`. The schema and its single-document contract do not include `watch` or `service`.
 
 A successful or attention-required document MUST contain `command`, `status`, ordered `scopes`, flattened `definitions`, fleet `summary`, `actions`, and `diagnostics`; timing and Overlord version MAY also appear.
 
@@ -285,6 +332,8 @@ Overlord runs Git only for its user source at `~/.agents`. It MUST NOT commit ge
 
 The implementation targets macOS and Linux with Node.js 22 or newer; Windows path semantics are not part of this version's contract.
 
+Background auto-sync is limited to the current user's LaunchAgent on macOS or user systemd manager on Linux. Overlord does not manage a root/system service, Linux linger, macOS app-bundled `SMAppService` registration, or another service manager.
+
 ## 15. Acceptance criteria
 
 1. Running the same command from unrelated working directories discovers the same configured fleet and produces the same ordered scope set for unchanged filesystem state.
@@ -295,6 +344,15 @@ The implementation targets macOS and Linux with Node.js 22 or newer; Windows pat
 1. Invalid canonical-backed state blocks only its scope, while conflicts and provider-only invalid state do not block unrelated safe work.
 1. A tracked single-sided deletion propagates within its scope, modification-versus-deletion conflicts remain untouched, and an untracked absence is materialized rather than treated as deletion.
 1. User and project definitions with the same name remain independent and are distinguishable by absolute `scopePath` in human and JSON reports.
-1. `init` creates or validates `~/.agents` as Overlord's only dedicated Git repository and records managed source in an initial fixed-message commit; a missing user repository makes inspection fail without mutation, user-source changes are committed once before provider propagation, and project repositories receive no Git operations.
-1. `status`, `check`, `sync`, and `init` obey their documented exit behavior, and JSON output validates against schema version 2.
+1. `init` validates an existing roots-only configuration before repository creation, rejects unsupported configuration without migration, creates or validates `~/.agents` as Overlord's only dedicated Git repository, preserves a modified bundled skill, and captures existing physical user canonical sources in managed history; a missing user repository makes inspection fail without mutation, user-source changes are committed once before provider propagation, and project repositories receive no Git operations.
+1. `status`, `check`, `sync`, and `init` obey their documented exit behavior, their JSON output validates against schema version 2, and `watch --json` plus `service --json` are rejected without changing the one-shot schema.
+1. `watch` performs an initial sync, observes only exact managed roots with a 750 millisecond quiet-period debounce, performs a full rescan every 30 seconds, serializes cycles, and shuts down gracefully on `SIGINT` and `SIGTERM`.
+1. A removal proposed within `watch` remains pending until the identical complete removal action survives a two-second grace period and a second full cycle; a changed action restarts confirmation.
+1. A stable current-UID lock below `/tmp`, independent of `TMPDIR`, permits only one watcher for the same absolute home identity regardless of whether it is foreground, tmux-hosted, or service-managed.
+1. `service install --dry-run` prints the exact plan without mutation or manager access; an ordinary install first requires a clean baseline and then creates only the current user's deterministic launchd or systemd definition and ownership receipt with a pinned absolute runtime and allowlisted environment.
+1. A coherent version 1 receipt is verified with its historical renderer without mutation, upgraded to version 2 by an explicit install when stale, and allowed to remain when byte-identical and healthy, while unsupported or incoherent receipts remain untouched as modified state.
+1. launchd uses a 60-second `ExitTimeOut` and a bounded transient bootstrap retry, while systemd uses a 120-second `TimeoutStopSec`.
+1. An owned launchd update or uninstall retains its definition and receipt until bounded manager polling confirms that `bootout` has converged; an unreachable manager or non-settling job fails without replacing or removing those files.
+1. Service status reports ownership, runtime, and manager health without mutation; logs are timestamped, quiet for healthy no-op scans, and bounded when read through the CLI.
+1. A colliding, mismatched, or modified service definition remains untouched, and uninstall removes only an unchanged owned definition and receipt while preserving fleet content, state, history, logs, and linger policy.
 1. Concurrent mutation of one scope is serialized, sibling scope failures are isolated, every file write is atomic, an interrupted skill copy leaves a reported partial tree rather than a corrupted or silently discarded one, and every symlink in a managed path is refused.

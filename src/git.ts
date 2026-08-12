@@ -81,6 +81,11 @@ async function runGit(
   pinRepository = true,
 ): Promise<GitResult> {
   const environment: NodeJS.ProcessEnv = { ...process.env };
+  const pinnedGit = environment.OVERLORD_GIT_EXECUTABLE;
+  if (pinnedGit !== undefined && !isAbsolute(pinnedGit)) {
+    throw repositoryError(root, `OVERLORD_GIT_EXECUTABLE must be an absolute path: ${pinnedGit}`);
+  }
+  const gitExecutable = pinnedGit ?? "git";
   for (const variable of INHERITED_REPOSITORY_VARIABLES) delete environment[variable];
   Object.assign(environment, {
     GCM_INTERACTIVE: "Never",
@@ -92,7 +97,7 @@ async function runGit(
   });
   const result = await new Promise<GitResult>((accept, reject) => {
     const child = spawn(
-      "git",
+      gitExecutable,
       [
         "--literal-pathspecs",
         ...GIT_IDENTITY,

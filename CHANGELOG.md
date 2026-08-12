@@ -2,6 +2,34 @@
 
 All notable changes to Overlord are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Added `overlord watch` as a foreground macOS and Linux auto-sync process with an initial synchronization, exact managed-root watching, a 750 millisecond quiet-period debounce, and a full fleet rescan every 30 seconds.
+- Added graceful `SIGINT` and `SIGTERM` shutdown for the foreground watcher.
+- Added human-only `overlord service install [--dry-run]`, `service status`, `service logs`, and `service uninstall` commands for a user LaunchAgent on macOS or user systemd unit on Linux.
+- Added existing-machine migration and background-service runbooks covering off-fleet backups, legacy configuration, definition audits, baseline-free conflicts, Git review, foreground-to-service handoff, platform paths, runtime pinning, logs, and safe uninstall.
+
+### Changed
+
+- Kept `--json` as a single-document option for the one-shot commands; `watch --json` is unsupported and no streaming JSON contract was added.
+- Made service installation require a clean fleet baseline and print the exact service plan, including its absolute Node and CLI runtime, allowlisted environment, generated definition, state and log paths, and manager commands.
+- Added timestamped service-mode watcher output and suppressed healthy no-op periodic scan lines while retaining action, attention, retry, and error reporting.
+- Rebuilt service `PATH` deterministically around pinned physical Node and Git executables so transient shell, IDE, and agent-wrapper paths are not captured.
+- Made new ownership receipts format version 2 while continuing to verify coherent version 1 installations with their historical renderer and upgrading them on explicit reinstall when stale.
+- Set launchd `ExitTimeOut` to 60 seconds, retained systemd `TimeoutStopSec` at 120 seconds, and bounded the transient launchd bootstrap I/O retry to three delayed retries.
+- Kept background integration strictly per-user and left Linux linger policy unchanged.
+
+### Safety
+
+- Holds a watcher removal until the same complete removal action remains present after a two-second grace period and a second full synchronization cycle.
+- Uses a stable private per-UID lock root below `/tmp`, independent of `TMPDIR`, so foreground, tmux, and service-managed watchers cannot reconcile one home concurrently even when their environments differ.
+- Records an ownership receipt and definition digest so install and uninstall refuse unowned, mismatched, or externally modified service files.
+- Serializes service lifecycle operations and verifies receipt coherence, file ownership and mode, physical parent chains, manager enablement, and rollback state before trusting or mutating an installation.
+- Waits for launchd `bootout` to converge during owned updates and uninstall, retaining the plist and receipt throughout a bounded poll and failing safely if launchd does not settle.
+- Makes uninstall remove only the unchanged Overlord-owned manager definition and receipt while preserving definitions, fleet configuration, ledger and Git history, project files, and logs.
+
 ## [0.2.0] - 2026-08-11
 
 ### Added

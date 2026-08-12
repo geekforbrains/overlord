@@ -107,6 +107,23 @@ describe("fleet safety contracts", () => {
     expect(lockPathForScope(alias)).toBe(lockPathForScope(physical));
   });
 
+  it.skipIf(process.platform === "win32")("keeps Unix lock identity stable across TMPDIR changes", async () => {
+    const scope = await temporaryDirectory();
+    const original = process.env.TMPDIR;
+    try {
+      process.env.TMPDIR = "/tmp/overlord-environment-a";
+      const first = lockPathForScope(scope);
+      process.env.TMPDIR = "/tmp/overlord-environment-b";
+      const second = lockPathForScope(scope);
+
+      expect(second).toBe(first);
+      expect(first).toMatch(/^\/tmp\/overlord-locks-uid-[0-9]+\//u);
+    } finally {
+      if (original === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = original;
+    }
+  });
+
   it("recovers a scope lock whose recorded owner no longer exists", async () => {
     const root = await temporaryDirectory();
     const scope = join(root, "project");

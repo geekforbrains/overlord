@@ -34,6 +34,7 @@ import {
   renderClaudeAgent,
   renderCodexAgent,
 } from "./render.js";
+import { removalApprovalKey } from "./removals.js";
 import { buildReconciliationPlans, recordForPlan, type ReconciliationPlan } from "./reconciliation.js";
 import { resolveTargetPaths, type TargetPaths } from "./targets.js";
 import type {
@@ -67,6 +68,14 @@ interface ScopeContext {
 
 interface ProgressCarrier {
   completedActions?: ActionRecord[];
+}
+
+export interface SynchronizeOptions {
+  /**
+   * When present, plans that remove files execute only when their exact action
+   * key is included. Omit this policy for ordinary foreground synchronization.
+   */
+  approvedRemovalActions?: ReadonlySet<string>;
 }
 
 function withCompletedActions(error: unknown, actions: ActionRecord[]): Error {
@@ -262,6 +271,20 @@ function reconciliationAction(
   if (writes.length > 0) action.writes = writes;
   if (removes.length > 0) action.removes = removes;
   return action;
+}
+
+function approvedPlans(
+  context: ScopeContext,
+  options: SynchronizeOptions,
+): ReconciliationPlan[] {
+  const approved = options.approvedRemovalActions;
+  if (approved === undefined) return context.plans;
+  return context.plans.filter((plan) => {
+    const action = reconciliationAction(context, plan, "planned");
+    if (action === undefined) return true;
+    const key = removalApprovalKey(action);
+    return key === undefined || approved.has(key);
+  });
 }
 
 async function inventoryScope(
@@ -627,10 +650,6 @@ function requiresLedgerPersistence(plan: ReconciliationPlan): boolean {
     || plan.providerOperations.length > 0;
 }
 
-function managedUserPlans(context: ScopeContext): ReconciliationPlan[] {
-  return context.plans.filter((plan) => plan.source !== "conflict" && plan.source !== "invalid");
-}
-
 function changesUserCanonical(plan: ReconciliationPlan): boolean {
   return plan.canonicalOperation !== "none"
     || plan.sides.canonical.delta === "added"
@@ -659,17 +678,18 @@ function commitAction(scope: Scope, commit: ManagedCommit): ActionRecord {
 async function synchronizeUserContext(
   context: ScopeContext,
   options: EngineOptions,
+  plans: readonly ReconciliationPlan[],
   actions: ActionRecord[],
 ): Promise<void> {
-  const plans = managedUserPlans(context);
-  for (const plan of plans) {
+  const managedPlans = plans.filter((plan) => plan.source !== "conflict" && plan.source !== "invalid");
+  for (const plan of managedPlans) {
     if (plan.canonicalOperation === "write") await writeCanonicalFromPlan(context, plan);
     else if (plan.canonicalOperation === "remove") await removeCanonicalFromPlan(context, plan);
     const action = reconciliationAction(context, plan, "completed", "canonical");
     if (action !== undefined) actions.push(action);
   }
 
-  const commitPlans = context.plans.filter((plan) => plan.source !== "invalid" && changesUserCanonical(plan));
+  const commitPlans = plans.filter((plan) => plan.source !== "invalid" && changesUserCanonical(plan));
   const commit = await commitManagedChanges({
     root: context.scope.canonical,
     paths: [configPath(context.scope.canonical), ...commitPlans.map((plan) => plan.canonicalPath)],
@@ -678,7 +698,7 @@ async function synchronizeUserContext(
   });
   if (commit !== null) actions.push(commitAction(context.scope, commit));
 
-  for (const plan of context.plans) {
+  for (const plan of plans) {
     if (plan.source === "invalid" || (plan.source === "conflict" && plan.providerOperations.length === 0)) continue;
     for (const operation of plan.providerOperations) await executeProviderOperation(context, plan, operation);
     const action = reconciliationAction(context, plan, "completed", "providers");
@@ -689,7 +709,12 @@ async function synchronizeUserContext(
   }
 }
 
-async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPhysicalPath: string | undefined): Promise<ActionRecord[]> {
+async function synchronizeScope(
+  scope: Scope,
+  options: EngineOptions,
+  expectedPhysicalPath: string | undefined,
+  synchronizeOptions: SynchronizeOptions,
+): Promise<ActionRecord[]> {
   await assertScopeIdentity(scope, expectedPhysicalPath);
   const preflight = await inventoryScope(scope, options, expectedPhysicalPath);
   if (blocksMutation(preflight)) return [];
@@ -700,9 +725,10 @@ async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPh
     await assertScopeIdentity(scope, expectedPhysicalPath);
     const context = await inventoryScope(scope, options, expectedPhysicalPath);
     if (!blocksMutation(context)) {
-      if (scope.type === "user") await synchronizeUserContext(context, options, actions);
+      const plans = approvedPlans(context, synchronizeOptions);
+      if (scope.type === "user") await synchronizeUserContext(context, options, plans, actions);
       else {
-        for (const plan of context.plans) {
+        for (const plan of plans) {
           const action = await executeReconciliationPlan(context, plan, options);
           if (action !== undefined) actions.push(action);
         }
@@ -715,14 +741,22 @@ async function synchronizeScope(scope: Scope, options: EngineOptions, expectedPh
   return actions;
 }
 
-export async function synchronize(options: EngineOptions): Promise<OutputDocument> {
+export async function synchronize(
+  options: EngineOptions,
+  synchronizeOptions: SynchronizeOptions = {},
+): Promise<OutputDocument> {
   const discovery = await fleetDiscovery(options);
   const actions: ActionRecord[] = [];
   const failures: Diagnostic[] = [];
   for (const scope of discovery.scopes) {
     if (discovery.diagnostics.some((entry) => entry.scopePath === scope.path && entry.severity === "error")) continue;
     try {
-      actions.push(...await synchronizeScope(scope, options, discovery.physicalPaths.get(scope.path)));
+      actions.push(...await synchronizeScope(
+        scope,
+        options,
+        discovery.physicalPaths.get(scope.path),
+        synchronizeOptions,
+      ));
     } catch (error) {
       actions.push(...completedActions(error));
       failures.push(scopeFailure(scope, error));

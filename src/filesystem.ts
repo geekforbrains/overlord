@@ -310,7 +310,27 @@ export function lockPathForScope(scopePath: string): string {
     physicalScope = resolve(scopePath);
   }
   const digest = createHash("sha256").update(physicalScope).digest("hex").slice(0, 24);
-  return join(tmpdir(), "overlord-locks", `${digest}.lock`);
+  const uid = process.getuid?.();
+  const owner = uid === undefined ? `pid-${process.pid}` : `uid-${uid}`;
+  const lockBase = process.platform === "win32" ? tmpdir() : "/tmp";
+  return join(lockBase, `overlord-locks-${owner}`, `${digest}.lock`);
+}
+
+async function ensurePrivateLockRoot(lockRoot: string): Promise<void> {
+  await mkdir(lockRoot, { recursive: true, mode: 0o700 });
+  const current = await lstat(lockRoot);
+  const uid = process.getuid?.();
+  if (
+    current.isSymbolicLink()
+    || !current.isDirectory()
+    || (Number(current.mode) & 0o077) !== 0
+    || (uid !== undefined && uid !== 0 && Number(current.uid) !== uid)
+  ) {
+    throw Object.assign(new Error(`Overlord lock directory must be private and owned by the current user: ${lockRoot}`), {
+      code: "permission-denied",
+      path: lockRoot,
+    });
+  }
 }
 
 async function lockOwnerIsStale(lockPath: string): Promise<boolean> {
@@ -334,7 +354,7 @@ async function lockOwnerIsStale(lockPath: string): Promise<boolean> {
 
 export async function acquireScopeLock(scopePath: string): Promise<() => Promise<void>> {
   const lockPath = lockPathForScope(scopePath);
-  await mkdir(dirname(lockPath), { recursive: true });
+  await ensurePrivateLockRoot(dirname(lockPath));
   try {
     await mkdir(lockPath);
   } catch (error) {

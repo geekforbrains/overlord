@@ -27,6 +27,8 @@
     "CHANGELOG.md",
     "dist",
     "assets",
+    "docs/background-service.md",
+    "docs/migrating-existing-machine.md",
     "docs/spec.md",
     "docs/schemas"
   ],

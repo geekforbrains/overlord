@@ -19,6 +19,8 @@ Use `overlord init` as the normal first command. It creates the user source, cre
 
 The configuration is deliberately just `roots`; it has no version field or automatic migration flow.
 
+> **Existing machine:** If `~/.agents` or provider-native definitions already exist, follow [Migrating an existing machine](docs/migrating-existing-machine.md) before running `init`. The guide covers inventory and off-fleet backups, legacy configuration, baseline-free conflicts, Git review, and starting auto-sync. Overlord does not migrate legacy configuration or choose a conflict winner for you.
+
 A configured root is both a discovery boundary and a project candidate. If the root itself contains supported definitions, it is synchronized as a project; otherwise only matching descendants become project scopes. Definitions are never hoisted between a root and its descendants.
 
 Within each root, Overlord discovers the root itself and descendants whose skill or agent directories contain entries under one or more of these paths:
@@ -43,11 +45,12 @@ The fleet commands ignore the current working directory and operate on the same 
 overlord status
 overlord sync
 overlord check
+overlord watch
 ```
 
-You can run those commands from anywhere on the machine.
+You can run those commands from anywhere on the machine. `watch` stays in the foreground and keeps the same fleet synchronized until it receives `SIGINT` or `SIGTERM`.
 
-All three commands require an existing dedicated Git repository at `~/.agents`; `overlord init` normally establishes it. A valid manually initialized repository, including one without a first commit, is also accepted. `status` and `check` only validate the repository and inspect the fleet; they never create a repository, initialize synchronization metadata, stage files, or commit. A home without that repository is an error rather than an implicit initialization.
+All four commands require an existing dedicated Git repository at `~/.agents`; `overlord init` normally establishes it. A valid manually initialized repository, including one without a first commit, is also accepted. `status` and `check` only validate the repository and inspect the fleet; they never create a repository, initialize synchronization metadata, stage files, or commit. A home without that repository is an error rather than an implicit initialization.
 
 ## Canonical sources and provider outputs
 
@@ -101,6 +104,8 @@ Set a target to `false` when an agent should not be rendered for that provider.
 
 Overlord reconciles these filesystem locations directly. It does not detect, invoke, or require either provider binary.
 
+Synchronization proves that the files agree; provider activation remains separate. In current Codex releases, project custom agents below `.codex/agents` are loaded only when the exact project or repository is trusted—trust for a parent such as `~/Projects` is not inherited—and a fresh Codex session is required after adding or changing an agent. Establish trust through Codex itself; Overlord does not create or modify provider trust settings. See the [Codex custom-agent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents).
+
 This is the only supported layout. Intentional edits should normally be made in `.agents`, but provider-native files are tracked synchronization endpoints because Claude or Codex may create, modify, or delete them while helping the user. Overlord incorporates an unambiguous native change into the same scope's `.agents` source before updating its other endpoints. Managed artifact roots, definition directories, files, and skill payload entries must be physical filesystem objects; Overlord does not follow or preserve symlinks in managed paths.
 
 The user source at `~/.agents` is the only Git repository Overlord owns. Its `.git` entry must be a physical directory whose work-tree top level is exactly `~/.agents`; Git worktree files, symlinked metadata, and repositories pointed at another work tree are rejected. Overlord never initializes, stages, commits, changes ignore rules in, pushes, or otherwise maintains a discovered project's Git repository. A project-side import may therefore leave ordinary `.agents` working-tree changes for that project to manage itself.
@@ -127,16 +132,33 @@ During `sync`, Overlord applies all safe user-canonical changes first, stages th
 
 Mutations use per-scope locks. Individual files are published atomically, so a half-written agent file never appears at its destination. A skill directory is validated and staged first, but its entries are published one at a time, so a failure partway through leaves a partial skill directory in place and reports the paths it created as a completed action. Overlord does not delete entries it did not create, and it does not guarantee that a provider never sees a partially materialized skill.
 
+### Auto-sync
+
+`overlord watch` provides auto-sync as a foreground process on macOS and Linux. It begins with a complete synchronization, then watches the exact managed canonical and provider artifact roots for the user and every discovered project. Watch events are invalidation hints rather than mutation instructions: Overlord waits for a 750 ms quiet period, then inventories and synchronizes the full fleet again.
+
+The watcher does not recursively monitor entire configured discovery roots. Instead, it performs a full discovery rescan every 30 seconds, which finds new projects and refreshes the exact managed-root watch set even if no filesystem event arrived. Events that occur during a synchronization are coalesced into a subsequent cycle.
+
+After the initial synchronization, a watcher cycle does not immediately execute a newly observed removal action. The same complete removal action must remain present after a two-second grace period and a second full cycle before it can proceed. If that action changes or disappears, confirmation starts over; each additional removal action requires its own confirmation.
+
+`SIGINT` and `SIGTERM` stop the foreground loop gracefully by closing its watchers and timers and allowing active synchronization work to settle. A home-scoped lifetime lock allows only one watcher at a time, so a foreground process, a `tmux` process, and a managed service cannot reconcile the same fleet concurrently. On macOS and Linux, the lock uses a fixed per-UID root below `/tmp`, independent of `TMPDIR`, so terminal and service-manager environments share the same lock identity.
+
+For login-session auto-sync, `overlord service` installs the same watcher as a user-level LaunchAgent on macOS or user systemd unit on Linux. It never installs a root or system service. Installation requires a clean fleet baseline, previews the exact pinned runtime and allowlisted environment, and uses an ownership receipt to refuse unowned or modified service definitions. See [Background auto-sync service](docs/background-service.md) for installation, logs, runtime relocation, Linux linger policy, and safe uninstall behavior.
+
 ## Commands
 
-| Command           | Behavior                                                                                                                                   |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `overlord init`   | Create or validate the dedicated user repository, initialize managed files and private ledger state, and make the initial managed commit. |
+| Command           | Behavior                                                                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `overlord init`   | Create or validate the dedicated user repository, initialize managed files and private ledger state, and make the initial managed commit.  |
 | `overlord status` | Require the user repository, inspect without mutation, and report definitions, diagnostics, and proposed actions; attention still exits 0. |
-| `overlord check`  | Require the user repository, perform the same read-only inspection, and exit 1 when attention is required.                              |
-| `overlord sync`   | Require the user repository, reconcile safe changes, commit user-source changes before provider propagation, and report conflicts.       |
+| `overlord check`  | Require the user repository, perform the same read-only inspection, and exit 1 when attention is required.                                 |
+| `overlord sync`   | Require the user repository, reconcile safe changes, commit user-source changes before provider propagation, and report conflicts.          |
+| `overlord watch`  | Run an initial sync, then keep the fleet synchronized in the foreground until interrupted.                                                   |
+| `overlord service install [--dry-run]` | Preview or install, enable, and start the current user's auto-sync service after a clean baseline check.                       |
+| `overlord service status` | Inspect service ownership, the pinned runtime, and manager state without mutation.                                                   |
+| `overlord service logs` | Print a bounded recent view of timestamped service output without following it.                                                         |
+| `overlord service uninstall` | Stop, disable, and remove only the unchanged Overlord-owned service definition and receipt.                                        |
 
-Commands accept `--json` for one schema-versioned JSON document on stdout. Help and installed-version output are available through `--help` and `--version`.
+The one-shot `init`, `status`, `check`, and `sync` commands accept `--json` for one schema-versioned JSON document on stdout. `watch --json` and `service --json` are unsupported; service commands are intentionally human-only. Help and installed-version output are available through `--help` and `--version`.
 
 The JSON contract exposes a `scopes` array plus flat definitions, actions, diagnostics, and an aggregate summary. See [docs/schemas/output.schema.json](docs/schemas/output.schema.json).
 
@@ -160,9 +182,11 @@ nvim ~/.agents/overlord/overlord.yaml
 node /absolute/path/to/overlord/dist/cli.js status
 node /absolute/path/to/overlord/dist/cli.js sync
 node /absolute/path/to/overlord/dist/cli.js check
+node /absolute/path/to/overlord/dist/cli.js watch
+node /absolute/path/to/overlord/dist/cli.js service install --dry-run
 ```
 
-To expose `overlord` as a local command without publishing to npm, run `npm link` from the checkout. Direct `node /absolute/path/to/overlord/dist/cli.js ...` invocation avoids changing global npm links.
+To expose `overlord` as a local command without publishing to npm, run `npm link` from the checkout. Direct `node /absolute/path/to/overlord/dist/cli.js ...` invocation avoids changing global npm links. Service installation resolves and pins the physical absolute Node executable and built CLI used for that invocation, and records the resolved physical Git executable; reinstall the service after relocating either runtime.
 
 After pulling source updates, run `npm ci` and `npm run check` again because generated `dist/` output is ignored by Git.
 
@@ -182,7 +206,7 @@ The full check runs linting, typechecking, the test suite, and the production bu
 
 ## Current limitations
 
-- Synchronization runs only when a command is invoked; there is no watcher, daemon, or background service.
+- Background auto-sync is per-user only: macOS uses a LaunchAgent and Linux uses a user systemd unit. Overlord does not install a root/system service or enable Linux lingering.
 - Provider binaries and their installed versions are not detected; filesystem reconciliation does not prove that an existing provider session has reloaded a definition.
 - Only filesystem-backed skills and custom agents are managed. Built-ins, plugins, marketplaces, organization policy, and session-only definitions remain outside the inventory.
 - `.claude/commands`, standalone MCP settings, rules, hooks, `CLAUDE.md`, and `AGENTS.md` are not synchronized.
@@ -198,4 +222,4 @@ The full check runs linting, typechecking, the test suite, and the production bu
 - [Claude Code: Custom subagents](https://code.claude.com/docs/en/sub-agents)
 - [Agent Skills specification](https://agentskills.io/specification)
 
-See the [changelog](CHANGELOG.md), [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract.
+See [Migrating an existing machine](docs/migrating-existing-machine.md), [Background auto-sync service](docs/background-service.md), the [changelog](CHANGELOG.md), [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract and operational guidance.

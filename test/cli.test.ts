@@ -1,10 +1,12 @@
 import { lstat, mkdir, readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { runCli } from "../src/cli.js";
+import type { OutputDocument } from "../src/types.js";
 import { cleanupTemporaryDirectories, prepareUserRepository, temporaryDirectory, validSkill, writeText } from "./helpers.js";
 
 afterEach(cleanupTemporaryDirectories);
@@ -64,6 +66,19 @@ async function fleetFixture() {
 function withoutTiming(document: Record<string, unknown>): Record<string, unknown> {
   const { timing: _timing, ...stable } = document;
   return stable;
+}
+
+function emptyWatchDocument(home: string): OutputDocument {
+  return {
+    schemaVersion: 2,
+    command: "sync",
+    status: "ok",
+    scopes: [{ type: "user", path: home, canonical: join(home, ".agents") }],
+    definitions: [],
+    summary: { total: 0, byState: {}, managed: 0 },
+    actions: [],
+    diagnostics: [],
+  };
 }
 
 describe("CLI contract", () => {
@@ -207,6 +222,167 @@ describe("CLI contract", () => {
     for (const option of ["--project", "--global", "--strict", "--resolve", "--dry-run"]) {
       expect(captured.stdout()).not.toContain(option);
     }
+  });
+
+  it("lists watch in top-level help", async () => {
+    const captured = captureIo();
+
+    expect(await runCli(["--help"], captured.io)).toBe(0);
+    expect(captured.stdout()).toContain("watch     Keep the fleet synchronized until interrupted");
+    expect(captured.stderr()).toBe("");
+  });
+
+  it("lists the service lifecycle and renders scoped help", async () => {
+    const topLevel = captureIo();
+    const service = captureIo();
+    const install = captureIo();
+
+    expect(await runCli(["--help"], topLevel.io)).toBe(0);
+    expect(topLevel.stdout()).toContain("service   Install and manage the user auto-sync service");
+    expect(await runCli(["service", "--help"], service.io)).toBe(0);
+    expect(service.stdout()).toContain("install    Install, enable, and start");
+    expect(service.stdout()).toContain("uninstall  Stop, disable, and remove");
+    expect(await runCli(["service", "install", "--help"], install.io)).toBe(0);
+    expect(install.stdout()).toBe("Usage: overlord service install [--dry-run]\n");
+  });
+
+  it("prints the exact generated service definition in an install dry-run", async () => {
+    const home = await temporaryDirectory();
+    const captured = captureIo();
+
+    expect(await runCli(
+      ["service", "install", "--dry-run"],
+      captured.io,
+      {
+        ...runtime(home),
+        service: {
+          platform: "darwin",
+          uid: 501,
+          nodePath: process.execPath,
+          cliPath: fileURLToPath(new URL("../src/cli.ts", import.meta.url)),
+        },
+      },
+    )).toBe(0);
+    expect(captured.stdout()).toContain("--- service definition ---\n");
+    expect(captured.stdout()).toContain("<key>Label</key>\n  <string>io.github.geekforbrains.overlord.watch</string>");
+    expect(captured.stdout()).toContain("--- end service definition ---\nservice install: dry-run\n");
+    expect(captured.stderr()).toBe("");
+  });
+
+  it("rejects unsupported service arguments without extending fleet JSON", async () => {
+    const unknown = captureIo();
+    const json = captureIo();
+    const misplacedDryRun = captureIo();
+
+    expect(await runCli(["service", "restart"], unknown.io)).toBe(2);
+    expect(unknown.stderr()).toContain("Unknown service command 'restart'");
+    expect(await runCli(["service", "status", "--json"], json.io)).toBe(2);
+    expect(json.stdout()).toBe("");
+    expect(json.stderr()).toContain("--json is not supported by service commands");
+    expect(await runCli(["status", "--dry-run"], misplacedDryRun.io)).toBe(2);
+    expect(misplacedDryRun.stderr()).toContain("--dry-run is supported only by 'service install'");
+  });
+
+  it("formats an asynchronously rejected service operation instead of leaking a promise rejection", async () => {
+    const home = await temporaryDirectory();
+    const captured = captureIo();
+
+    await expect(runCli(
+      ["service", "status"],
+      captured.io,
+      { ...runtime(home), service: { platform: "win32", uid: 501 } },
+    )).resolves.toBe(2);
+    expect(captured.stdout()).toBe("");
+    expect(captured.stderr()).toContain("User services are supported only on macOS and Linux");
+  });
+
+  it("does not advertise JSON output in watch help", async () => {
+    const captured = captureIo();
+
+    expect(await runCli(["watch", "--help"], captured.io)).toBe(0);
+    expect(captured.stdout()).toBe("Usage: overlord watch\n");
+    expect(captured.stdout()).not.toContain("--json");
+    expect(captured.stderr()).toBe("");
+  });
+
+  it("rejects watch JSON output as a human usage error", async () => {
+    const captured = captureIo();
+
+    expect(await runCli(["watch", "--json"], captured.io)).toBe(2);
+    expect(captured.stdout()).toBe("");
+    expect(captured.stderr()).toContain("overlord: --json is not supported by watch");
+    expect(captured.stderr()).toContain("Try 'overlord --help' for usage.");
+  });
+
+  it("exits an already-aborted watch without starting or hanging", async () => {
+    const home = await temporaryDirectory();
+    const controller = new AbortController();
+    const captured = captureIo();
+    controller.abort();
+
+    const code = await runCli(
+      ["watch"],
+      captured.io,
+      { ...runtime(home), signal: controller.signal },
+    );
+
+    expect(code).toBe(0);
+    expect(captured.stdout()).toBe("");
+    expect(captured.stderr()).toBe("");
+  });
+
+  it("prints lifecycle output and closes injected watchers on abort", async () => {
+    const home = await temporaryDirectory();
+    const controller = new AbortController();
+    const captured = captureIo();
+    let closed = 0;
+
+    const running = runCli(
+      ["watch"],
+      captured.io,
+      {
+        ...runtime(home),
+        signal: controller.signal,
+        watch: {
+          synchronize: async () => emptyWatchDocument(home),
+          watchFactory: () => ({ close: () => { closed += 1; } }),
+          scanIntervalMs: 0,
+        },
+      },
+    );
+
+    await expect.poll(captured.stdout).toContain("watch: started (initial sync): ok;");
+    controller.abort();
+
+    expect(await running).toBe(0);
+    expect(captured.stdout()).toContain("watch: stopped\n");
+    expect(captured.stderr()).toBe("");
+    expect(closed).toBeGreaterThan(0);
+  });
+
+  it("allows only one watcher process per user fleet", async () => {
+    const home = await temporaryDirectory();
+    const firstController = new AbortController();
+    const firstCapture = captureIo();
+    const secondCapture = captureIo();
+    const watch = {
+      synchronize: async () => emptyWatchDocument(home),
+      watchFactory: () => ({ close() {} }),
+      scanIntervalMs: 0,
+    };
+
+    const first = runCli(
+      ["watch"],
+      firstCapture.io,
+      { ...runtime(home), signal: firstController.signal, watch },
+    );
+    await expect.poll(firstCapture.stdout).toContain("watch: started (initial sync): ok;");
+
+    expect(await runCli(["watch"], secondCapture.io, { ...runtime(home), watch })).toBe(2);
+    expect(secondCapture.stderr()).toContain("Another Overlord mutation holds the scope lock");
+
+    firstController.abort();
+    expect(await first).toBe(0);
   });
 
   it("prints the installed version", async () => {
