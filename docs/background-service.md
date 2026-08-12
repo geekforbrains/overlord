@@ -4,6 +4,8 @@
 
 The service has the same reconciliation and deletion safeguards as a foreground watcher. It performs an initial synchronization, watches exact managed artifact roots, rescans the fleet every 30 seconds, and stops gracefully when its manager sends `SIGTERM`.
 
+For a compact new-machine LaunchAgent setup, use the [macOS quick start](macos-quickstart.md). The macOS path has end-to-end Apple Silicon evidence, including real automatic propagation and `KeepAlive` restart. Linux has automated lifecycle and renderer coverage but still needs broader real-host systemd validation; Intel macOS and actual logout/login or reboot recovery are also beta test targets.
+
 ## Before installation
 
 Initialize and reconcile the machine first:
@@ -108,6 +110,10 @@ Service-mode watcher lines include an ISO 8601 timestamp. A healthy 30-second pe
 - Linux requests the most recent 200 lines for `overlord-watch.service` from the current user's journal without a pager.
 
 Overlord does not delete logs during uninstall. systemd journal retention remains a host policy. The macOS files are append-only launchd destinations, so long-term rotation or retention remains the operator's responsibility.
+
+That operator-managed macOS retention is the supported contract for this release; Overlord does not rotate the files itself. The bounded view is historical, so an old error can remain visible after a later successful cycle. Use current `overlord check` and `overlord service status` output to determine present health.
+
+Prepare a complete skill or agent before renaming it into a managed artifact root. If a watcher observes a newly created definition directory before its required file or frontmatter has been written, it reports the incomplete definition, preserves it, and normally converges on a later event or periodic scan after the write finishes. Staging below a non-managed directory such as `<project>/.agents/.staging` avoids that transient noise.
 
 ## Moving from a foreground or tmux watcher
 

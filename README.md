@@ -1,6 +1,6 @@
 # Overlord
 
-Overlord 0.2 keeps user-level and project-level Claude Code and OpenAI Codex CLI skills and custom agents synchronized across a configured fleet of directories. Every scope has its own durable `.agents` source and is reconciled independently, including changes made through a provider's native files.
+Overlord keeps user-level and project-level Claude Code and OpenAI Codex CLI skills and custom agents synchronized across a configured fleet of directories. Every scope has its own durable `.agents` source and is reconciled independently, including changes made through a provider's native files.
 
 > **Distribution status:** Overlord is available as public source at [github.com/geekforbrains/overlord](https://github.com/geekforbrains/overlord), but it is not published to npm. The npm package named `overlord` is unrelated, so do not install or execute it.
 
@@ -20,6 +20,8 @@ Use `overlord init` as the normal first command. It creates the user source, cre
 The configuration is deliberately just `roots`; it has no version field or automatic migration flow.
 
 > **Existing machine:** If `~/.agents` or provider-native definitions already exist, follow [Migrating an existing machine](docs/migrating-existing-machine.md) before running `init`. The guide covers inventory and off-fleet backups, legacy configuration, baseline-free conflicts, Git review, and starting auto-sync. Overlord does not migrate legacy configuration or choose a conflict winner for you.
+
+> **macOS auto-sync:** For a new Mac, use the [macOS quick start](docs/macos-quickstart.md). It covers installing an exact source release, configuring roots, reviewing the first synchronization, installing the per-user LaunchAgent, and verifying automatic propagation without a manual `sync`.
 
 A configured root is both a discovery boundary and a project candidate. If the root itself contains supported definitions, it is synchronized as a project; otherwise only matching descendants become project scopes. Definitions are never hoisted between a root and its descendants.
 
@@ -190,6 +192,8 @@ To expose `overlord` as a local command without publishing to npm, run `npm link
 
 After pulling source updates, run `npm ci` and `npm run check` again because generated `dist/` output is ignored by Git.
 
+For a friend-facing release install, check out the exact release tag rather than a moving branch. The package rebuilds `dist/` before `npm pack`, but source users should still run the full check before linking or installing the service.
+
 ## Development
 
 ```sh
@@ -206,6 +210,8 @@ The full check runs linting, typechecking, the test suite, and the production bu
 
 ## Current limitations
 
+- The launchd path has been exercised end-to-end on Apple Silicon macOS, including automatic project discovery, bidirectional skill synchronization, portable-agent rendering, deletion grace, singleton locking, and `KeepAlive` restart. Intel macOS and actual logout/login or reboot recovery still need broader tester coverage.
+- Linux systemd support has automated renderer and lifecycle coverage but has not yet completed the same real-host validation matrix; treat it as beta until that evidence exists.
 - Background auto-sync is per-user only: macOS uses a LaunchAgent and Linux uses a user systemd unit. Overlord does not install a root/system service or enable Linux lingering.
 - Provider binaries and their installed versions are not detected; filesystem reconciliation does not prove that an existing provider session has reloaded a definition.
 - Only filesystem-backed skills and custom agents are managed. Built-ins, plugins, marketplaces, organization policy, and session-only definitions remain outside the inventory.
@@ -222,4 +228,4 @@ The full check runs linting, typechecking, the test suite, and the production bu
 - [Claude Code: Custom subagents](https://code.claude.com/docs/en/sub-agents)
 - [Agent Skills specification](https://agentskills.io/specification)
 
-See [Migrating an existing machine](docs/migrating-existing-machine.md), [Background auto-sync service](docs/background-service.md), the [changelog](CHANGELOG.md), [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract and operational guidance.
+See the [macOS quick start](docs/macos-quickstart.md), [Migrating an existing machine](docs/migrating-existing-machine.md), [Background auto-sync service](docs/background-service.md), the [changelog](CHANGELOG.md), [full specification](docs/spec.md), [configuration schema](docs/schemas/config.schema.json), and [CLI output schema](docs/schemas/output.schema.json) for the complete public contract and operational guidance.

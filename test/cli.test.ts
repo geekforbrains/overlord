@@ -387,9 +387,12 @@ describe("CLI contract", () => {
 
   it("prints the installed version", async () => {
     const captured = captureIo();
+    const packageMetadata = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
 
     expect(await runCli(["--version"], captured.io)).toBe(0);
-    expect(captured.stdout()).toMatch(/^\d+\.\d+\.\d+\n$/);
+    expect(captured.stdout()).toBe(`${packageMetadata.version}\n`);
   });
 
   it("rejects planned actions in an error JSON document", async () => {

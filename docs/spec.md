@@ -312,7 +312,7 @@ Every mutating scope MUST be inventoried before locking and again while locked s
 
 File writes, replacements, and removals MUST refuse to act on observations that became stale after inventory.
 
-A single file MUST be published atomically, so a partially written file is never observable at its destination. A directory copy is validated and staged first, but its entries are published individually into the destination, so publication of a skill tree as a whole is not atomic. A failure partway through MUST leave the partial tree in place rather than deleting entries it did not create, and MUST report the created paths as a completed action so the incomplete output is recoverable and visible. Version 0.2 does not guarantee that a provider never observes a partially materialized skill directory.
+A single file MUST be published atomically, so a partially written file is never observable at its destination. A directory copy is validated and staged first, but its entries are published individually into the destination, so publication of a skill tree as a whole is not atomic. A failure partway through MUST leave the partial tree in place rather than deleting entries it did not create, and MUST report the created paths as a completed action so the incomplete output is recoverable and visible. Overlord does not guarantee that a provider never observes a partially materialized skill directory.
 
 Before writing or removing, Overlord MUST verify that the destination remains inside the scope or configured user-native boundary and MUST refuse traversal through symlinked parent directories.
 
@@ -322,7 +322,7 @@ Completed actions and Git commits MUST remain reportable if a later step fails.
 
 ## 14. Limitations
 
-Version 0.2 manages only filesystem-backed skills and custom agents in the documented locations.
+Overlord manages only filesystem-backed skills and custom agents in the documented locations.
 
 Built-in, organization-managed, plugin-provided, marketplace, and session-only definitions are outside inventory.
 

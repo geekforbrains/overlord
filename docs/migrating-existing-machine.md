@@ -248,6 +248,8 @@ The service pins physical absolute paths for the Node executable and built Overl
 
 See [Background auto-sync service](background-service.md) for platform paths, receipt and tamper behavior, logging bounds, runtime upgrades, and uninstall guarantees.
 
+For the compact new-machine flow and a post-install auto-sync smoke test on macOS, see [macOS quick start](macos-quickstart.md).
+
 ## Checklist for a coding agent
 
 When helping with an existing-machine migration:
