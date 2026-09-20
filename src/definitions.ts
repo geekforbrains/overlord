@@ -3,6 +3,7 @@ import { basename, extname, join, relative } from "node:path";
 
 import { parseFrontmatter } from "./frontmatter.js";
 import { reservedSkillArtifact } from "./filesystem.js";
+import { isClaudeOwnedSkillName } from "./targets.js";
 import type {
   CanonicalAgent,
   CanonicalScope,
@@ -199,6 +200,16 @@ async function loadSkill(
 ): Promise<CanonicalSkill> {
   const directoryName = basename(directory);
   const skillFile = join(directory, "SKILL.md");
+  if (isClaudeOwnedSkillName(directoryName)) {
+    diagnostic(
+      diagnostics,
+      "error",
+      "reserved-claude-skill-name",
+      `Skill name '${directoryName}' is reserved for Claude-owned storage; choose a different canonical skill name.`,
+      directory,
+    );
+    return { name: directoryName, path: directory, valid: false };
+  }
   try {
     if ((await lstat(directory)).isSymbolicLink()) {
       diagnostic(

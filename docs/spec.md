@@ -99,6 +99,8 @@ Codex reads canonical skills directly from `<scope>/.agents/skills`, so Overlord
 
 Claude skills MUST be materialized as physical directories under `.claude/skills`; canonical agents MUST be deterministically rendered as physical files in both enabled native agent locations.
 
+Immediate entries named `synced` or `.trash`, compared case-insensitively, in a Claude skill root are provider-owned storage. Overlord MUST NOT inventory them as definitions, traverse their payloads, import their nested skills, or write or remove their contents. This exclusion applies to user, configured `CLAUDE_CONFIG_DIR`, and project Claude skill roots, including empty containers. Other malformed local skill entries MUST retain normal validation errors. See [Claude's synced skill lifecycle](https://code.claude.com/docs/en/skills#where-synced-skills-load).
+
 The user source at `~/.agents` MUST be a dedicated Git repository initialized and maintained by Overlord. Its `.git` entry MUST be a physical directory, and the repository's physical work-tree top level MUST be the user canonical root. A Git worktree file, symlinked `.git`, or repository configured with another work tree MUST be rejected. A project source at `<project>/.agents` belongs to its containing project; Overlord MUST NOT inspect or otherwise invoke Git in that project repository.
 
 ## 5. Canonical skill format
@@ -106,6 +108,8 @@ The user source at `~/.agents` MUST be a dedicated Git repository initialized an
 A canonical skill is a physical directory named for the skill and containing `SKILL.md` with YAML frontmatter.
 
 The `name` field MUST equal the directory name, MUST contain 1–64 lowercase ASCII letters, digits, or single hyphens, and MUST have no leading, trailing, or consecutive hyphen.
+
+Canonical skill directories named `synced` or `.trash` in any capitalization MUST produce a `reserved-claude-skill-name` error. Reconciliation MUST refuse all operations for these names, including writes or deletions derived from older ledger entries; it MUST NOT interpret excluded provider storage as a missing or deleted managed skill. These names are reserved only at the skill-root boundary, not for nested payload directories or custom agents.
 
 The `description` field MUST be a non-empty string no longer than 1,024 characters.
 

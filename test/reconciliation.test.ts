@@ -30,6 +30,33 @@ async function fixture() {
 }
 
 describe("last-sync reconciliation", () => {
+  it.each(["synced", ".trash"])("never writes or removes reserved %s from an old ledger", async (name) => {
+    const { home, project, options } = await fixture();
+    await writeText(join(project, ".agents/skills/verify-build/SKILL.md"), validSkill);
+    expect((await synchronize(options)).status).toBe("ok");
+    const ledgerFile = ledgerPath(join(home, ".agents"), await physicalScopeIdentity(project));
+    const ledger = JSON.parse(await readFile(ledgerFile, "utf8"));
+    const entry = ledger.entries.skill["verify-build"];
+    ledger.entries.skill[name] = JSON.parse(JSON.stringify(entry).replaceAll("verify-build", name));
+    await writeText(ledgerFile, JSON.stringify(ledger));
+    const owned = join(project, ".claude/skills", name, "account/keep.txt");
+    await writeText(owned, "preserve me\n");
+
+    for (const canonicalPresent of [false, true]) {
+      if (canonicalPresent) {
+        await writeText(join(project, ".agents/skills", name, "SKILL.md"), validSkill.replace("verify-build", name));
+      }
+      const result = await synchronize(options);
+      expect(result.status).toBe("attention-required");
+      expect(result.definitions).toContainEqual(expect.objectContaining({
+        name, state: "invalid", evidence: expect.stringContaining("reserved"),
+      }));
+      expect(result.actions).toEqual([]);
+      expect(await readFile(owned, "utf8")).toBe("preserve me\n");
+      expect(await readFile(ledgerFile, "utf8")).toBe(JSON.stringify(ledger));
+    }
+  });
+
   it("treats empty directories and non-executable permission differences as non-content", async () => {
     const { project, options } = await fixture();
     const canonical = join(project, ".agents/skills/verify-build");

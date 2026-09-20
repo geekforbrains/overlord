@@ -51,6 +51,8 @@ Read every scope, proposed action, conflict, and diagnostic before the first `sy
 
 Continue only when `overlord check` reports `check: ok`.
 
+Claude-managed `skills/synced/` and `skills/.trash/` containers are left alone, including case variants. They are not local skill definitions and need no migration. Do not use those names for canonical skills; Overlord reports a reserved-name error before writing to Claude's storage.
+
 ## 4. Preview and install auto-sync
 
 Stop any foreground or `tmux`-hosted `overlord watch` first. Then review the complete LaunchAgent plan before installing it:

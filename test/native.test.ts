@@ -31,6 +31,26 @@ function codexAgentSource(name: string): string {
 }
 
 describe("native inventory", () => {
+  it.each(["synced", "Synced", "SYNCED", ".trash", ".TRASH"])(
+    "leaves Claude-owned %s storage out of inventory, even with nested payloads",
+    async (name) => {
+      const scope = await temporaryDirectory();
+      const paths = targetPaths(scope);
+      const container = join(paths.claude.skills, name);
+      await mkdir(container, { recursive: true });
+      expect(await scanNative(paths)).toEqual([]);
+      await writeText(join(container, "account-bucket/pdf/SKILL.md"), skillSource("pdf"));
+      await writeText(join(container, "account-bucket/manifest.json"), "{}\n");
+      await symlink("missing-target", join(container, "account-link"));
+      await writeText(join(paths.claude.skills, "local", "SKILL.md"), skillSource("local"));
+      await mkdir(join(paths.claude.skills, "malformed"));
+      expect(await scanNative(paths)).toEqual([
+        expect.objectContaining({ name: "local", valid: true }),
+        expect.objectContaining({ name: "malformed", valid: false }),
+      ]);
+    },
+  );
+
   it("scans only the supported Claude skills and Claude and Codex agents", async () => {
     const scope = await temporaryDirectory();
     const paths = targetPaths(scope);

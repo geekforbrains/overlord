@@ -7,6 +7,20 @@ import { loadCanonicalScope } from "../src/definitions.js";
 afterEach(cleanupTemporaryDirectories);
 
 describe("canonical definitions", () => {
+  it.each(["synced", "Synced", "SYNCED", ".trash", ".TRASH"])(
+    "rejects canonical skills colliding with Claude-owned %s storage",
+    async (name) => {
+      const root = await temporaryDirectory();
+      const path = join(root, ".agents/skills", name);
+      await writeText(join(path, "SKILL.md"), validSkill.replace("verify-build", name));
+      const loaded = await loadCanonicalScope(join(root, ".agents"));
+      expect(loaded.skills).toContainEqual({ name, path, valid: false });
+      expect(loaded.diagnostics).toContainEqual(expect.objectContaining({
+        code: "reserved-claude-skill-name", severity: "error", path,
+      }));
+    },
+  );
+
   it("loads a standard skill without changing its files", async () => {
     const root = await temporaryDirectory();
     const skill = join(root, ".agents/skills/verify-build");

@@ -5,7 +5,7 @@ import { isPortableSkillName } from "./definitions.js";
 import { IGNORED_SKILL_FILES, reservedSkillArtifact } from "./filesystem.js";
 import { parseFrontmatter } from "./frontmatter.js";
 import { parseClaudeAgent, parseCodexAgent } from "./render.js";
-import type { TargetPaths } from "./targets.js";
+import { isClaudeOwnedSkillName, type TargetPaths } from "./targets.js";
 import type { ArtifactKind, CanonicalAgent, TargetName } from "./types.js";
 
 /** One supported definition found in a provider-native artifact root. */
@@ -99,7 +99,7 @@ async function scanSkillRoot(root: string): Promise<NativeDefinition[]> {
   const entries = await directoryEntries(root);
   entries.sort((left, right) => compareText(left.name, right.name));
   for (const entry of entries) {
-    if (ignoredArtifact(entry.name)) continue;
+    if (ignoredArtifact(entry.name) || isClaudeOwnedSkillName(entry.name)) continue;
     const path = join(root, entry.name);
     if (!entry.isDirectory() && !entry.isSymbolicLink()) {
       if (isPortableSkillName(entry.name)) {

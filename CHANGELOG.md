@@ -4,6 +4,10 @@ All notable changes to Overlord are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Leave Claude-managed `synced` and `.trash` skill storage untouched, including case variants and configured Claude roots. Reject canonical collisions and block old ledger operations for these reserved names instead of reporting Claude's containers as invalid local skills.
+
 ## [0.3.0-beta.1] - 2026-08-12
 
 This is a macOS-first prerelease for broader testing. The launchd path has end-to-end Apple Silicon evidence; real-host systemd, Intel macOS, and actual logout/login or reboot recovery remain explicit beta test targets.

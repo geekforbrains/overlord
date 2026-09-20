@@ -75,6 +75,8 @@ Correct structural problems that you can identify without choosing between compe
 
 ### Skills
 
+Claude's `skills/synced/` account downloads and `skills/.trash/` removal storage are excluded from Overlord, including case variants and configured Claude roots. Leave them in place; do not move them, flatten their nested skills, or add a dummy `SKILL.md`. Empty containers are excluded too. These names cannot be canonical skills: a reserved-name diagnostic requires choosing a different name for the authored skill, while preserving Claude's storage. Older ledger entries with these names remain blocked rather than triggering a restore or deletion.
+
 - A skill must be a physical directory containing `SKILL.md` with valid YAML frontmatter.
 - Its `name` must match the directory name and use 1–64 lowercase ASCII letters, digits, or single hyphens, without leading, trailing, or consecutive hyphens.
 - `description` must be a non-empty string no longer than 1,024 characters.

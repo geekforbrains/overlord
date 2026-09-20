@@ -82,6 +82,38 @@ function emptyWatchDocument(home: string): OutputDocument {
 }
 
 describe("CLI contract", () => {
+  it.each(["user", "configured", "project"])(
+    "keeps status and check healthy and repeated sync non-mutating for Claude-owned storage in %s scope",
+    async (location) => {
+      const { home, project } = await fleetFixture();
+      const options = runtime(home);
+      if (location === "configured") options.env.CLAUDE_CONFIG_DIR = join(home, "custom-claude");
+      const skillsRoot = location === "project"
+        ? join(project, ".claude/skills")
+        : join(options.env.CLAUDE_CONFIG_DIR, "skills");
+      const files = [
+        join(skillsRoot, "SyNcEd/account-bucket/pdf/SKILL.md"),
+        join(skillsRoot, "SyNcEd/account-bucket/manifest.json"),
+        join(skillsRoot, ".trash/removed/SKILL.md"),
+      ];
+      for (const path of files) await writeText(path, "Claude-owned bytes\n", 0o600);
+      const before = await Promise.all(files.map((path) => lstat(path)));
+      for (const command of ["sync", "status", "check", "sync", "check"]) {
+        const output = captureIo();
+        expect(await runCli([command, "--json"], output.io, options)).toBe(0);
+        const document = await parseSingleJson(output.stdout());
+        expect(document.status).toBe("ok");
+        expect(JSON.stringify(document)).not.toMatch(/SyNcEd|\.trash|account-bucket/);
+      }
+      for (const [index, path] of files.entries()) {
+        expect(await readFile(path, "utf8")).toBe("Claude-owned bytes\n");
+        const after = await lstat(path);
+        expect(after.mtimeMs).toBe(before[index]!.mtimeMs);
+        expect(after.mode).toBe(before[index]!.mode);
+      }
+    },
+  );
+
   it.each(["init", "status", "check", "sync"])("accepts bare %s and optional JSON output", async (command) => {
     const home = await temporaryDirectory();
     const human = captureIo();

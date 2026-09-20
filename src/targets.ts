@@ -7,6 +7,11 @@ export interface TargetPaths {
   codex: { agents: string };
 }
 
+/** Claude owns these skill-root entries, including case aliases on any filesystem. */
+export function isClaudeOwnedSkillName(name: string): boolean {
+  return name.toLowerCase() === "synced" || name.toLowerCase() === ".trash";
+}
+
 function userTargetRoot(value: string | undefined, fallback: string, home: string): string {
   if (value === undefined || value.length === 0) return fallback;
   return isAbsolute(value) ? resolve(value) : resolve(home, value);

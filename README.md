@@ -74,6 +74,8 @@ User definitions live below `~/.agents`; every discovered project keeps its defi
 
 Skills use the [Agent Skills](https://agentskills.io/specification) directory format. Codex reads `.agents/skills` directly, while Overlord copies each canonical skill to a physical directory in Claude's skill location.
 
+Claude's `skills/synced/` account downloads and `skills/.trash/` storage stay under Claude's control. Overlord excludes these names case-insensitively at user and project Claude skill roots, including configured Claude locations, and never imports their nested skills. Canonical skills cannot use these reserved names.
+
 The synchronized skill value is its file paths, file bytes, and executable bits—the same information Git can preserve. Empty directories, directory permissions, and other non-executable permission differences are not treated as skill changes. A nested `.git` entry, including a case variant, is invalid because the owning source repository cannot preserve it as ordinary skill files.
 
 Canonical agents are portable Markdown definitions. Overlord renders each enabled agent to Claude Markdown and Codex TOML while preserving provider-specific fields under its target overlay.

@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -573,7 +573,7 @@ async function eventually(assertion: () => Promise<void>, timeoutMs = 8_000): Pr
 }
 
 it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
-  "converges a real canonical edit through filesystem watching or periodic recovery",
+  "converges a real canonical edit while preserving Claude-owned storage across watcher cycles",
   async () => {
     const home = await temporaryDirectory();
     const discoveryRoot = await temporaryDirectory();
@@ -593,6 +593,12 @@ it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
     );
     await prepareUserRepository(home);
     await writeText(canonical, validSkill);
+    const owned = [
+      join(project, ".claude/skills/synced/account/remote/SKILL.md"),
+      join(home, ".claude/skills/.trash/account/removed/SKILL.md"),
+    ];
+    for (const path of owned) await writeText(path, "owned by Claude\n");
+    const ownedStats = await Promise.all(owned.map((path) => lstat(path)));
 
     const controller = new AbortController();
     const reports: WatchReport[] = [];
@@ -629,6 +635,14 @@ it.skipIf(process.platform !== "darwin" && process.platform !== "linux")(
           ))
         ))).toBe(true);
       });
+      for (const report of reports.filter((entry): entry is Extract<WatchReport, { document: OutputDocument }> => "document" in entry)) {
+        expect(report.document.status).toBe("ok");
+        expect(report.document.definitions?.map((definition) => definition.name)).toEqual(["verify-build"]);
+      }
+      for (const [index, path] of owned.entries()) {
+        expect(await readFile(path, "utf8")).toBe("owned by Claude\n");
+        expect((await lstat(path)).mtimeMs).toBe(ownedStats[index]!.mtimeMs);
+      }
     } finally {
       controller.abort();
       await watching;

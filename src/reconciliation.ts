@@ -15,7 +15,7 @@ import type {
   Scope,
   TargetName,
 } from "./types.js";
-import type { TargetPaths } from "./targets.js";
+import { isClaudeOwnedSkillName, type TargetPaths } from "./targets.js";
 
 export type SideDelta = "absent" | "unchanged" | "added" | "modified" | "deleted";
 export type ReconciliationSource = "none" | "canonical" | "claude" | "codex" | "merged-native" | "delete" | "conflict" | "invalid";
@@ -219,6 +219,27 @@ async function buildSkillPlan(
 ): Promise<ReconciliationPlan> {
   const canonicalPath = expectedCanonicalPath(input.scope, "skill", name);
   const claudeExpected = expectedProviderPath(input.paths, "skill", name, "claude");
+  // Old ledgers can still name a newly reserved location. Never interpret its
+  // absence from native inventory as a deletion or attempt to restore it.
+  if (isClaudeOwnedSkillName(name)) {
+    return {
+      kind: "skill",
+      name,
+      canonicalPath,
+      ...(canonical === undefined ? {} : { canonical }),
+      sides: {
+        canonical: { ...blankSide("canonical", canonicalPath), present: canonical !== undefined, valid: false },
+        claude: blankSide("claude", claudeExpected),
+        codex: blankSide("codex", canonicalPath),
+      },
+      source: "invalid",
+      state: "invalid",
+      evidence: `Skill name '${name}' is reserved for Claude-owned storage; it cannot be synchronized.`,
+      canonicalOperation: "none",
+      providerOperations: [],
+      canRecordBaseline: false,
+    };
+  }
   const candidates = nativeCandidates(input.native, "skill", name, "claude");
   const sides = {
     canonical: await canonicalSide("skill", canonicalPath, canonical, baseline),
