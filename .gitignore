@@ -14,3 +14,4 @@ coverage/
 *.swo
 *~
 .DS_Store
+PLAN.md
