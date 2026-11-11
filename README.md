@@ -124,7 +124,7 @@ Review the requested change. Lead with actionable findings and cite files.
 | `overlord status [--json]` | Read-only inspection across user and project scopes (always exits `0`). |
 | `overlord check [--json]` | Read-only inspection; exits `1` if any pending actions, warnings, or errors exist. |
 | `overlord sync [--dry-run] [--json]` | Reconcile skills, agents, and `AGENTS.md` links across all scopes. |
-| `overlord watch` | Run an initial sync, then watch managed roots and rescan every 30s until `SIGINT`/`SIGTERM`. |
+| `overlord watch` | Run an initial sync, then watch managed roots and rescan every 5s until `SIGINT`/`SIGTERM`. |
 | `overlord service install [--dry-run]` | Preview or install and start the per-user LaunchAgent (macOS) or systemd user unit (Linux). |
 | `overlord service status` | Check ownership receipt, pinned binary, and service manager state. |
 | `overlord service logs` | Print recent service logs. |

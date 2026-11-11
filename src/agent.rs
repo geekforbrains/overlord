@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::config::{Scope, ScopeKind, Target};
-use crate::fsx::{is_ignored_junk, sha256_hex, write_atomic};
+use crate::fsx::{is_ignored_junk, prune_empty_provider_dirs, sha256_hex, write_atomic};
 use crate::report::{ActionRecord, DefinitionRecord, Diagnostic};
 use crate::skills::split_frontmatter;
 use crate::state::{AgentRecord, StateFile};
@@ -747,14 +747,23 @@ pub fn sync_scope_agents(
                 }
 
                 for (t, (p, _, _, _)) in &native_files {
-                    if !dry_run && let Err(e) = fs::remove_file(p) {
-                        diagnostics.push(Diagnostic::error(
-                            Some(&scope.path),
-                            "remove-failed",
-                            format!("Failed to remove {}: {e}", p.display()),
-                            Some(p),
-                        ));
-                        continue;
+                    if !dry_run {
+                        if let Err(e) = fs::remove_file(p) {
+                            diagnostics.push(Diagnostic::error(
+                                Some(&scope.path),
+                                "remove-failed",
+                                format!("Failed to remove {}: {e}", p.display()),
+                                Some(p),
+                            ));
+                            continue;
+                        }
+                        if let Some(dir) = p.parent() {
+                            prune_empty_provider_dirs(
+                                dir,
+                                &scope.path,
+                                scope.kind == ScopeKind::Project,
+                            );
+                        }
                     }
                     actions.push(ActionRecord {
                         scope_path: scope_str.clone(),
@@ -767,6 +776,7 @@ pub fn sync_scope_agents(
                     });
                 }
                 if !dry_run {
+                    prune_empty_provider_dirs(&scope.canonical_agents, &scope.path, false);
                     state.remove_agent(&scope.path, &name);
                     outcome.state_changed = true;
                 }
@@ -941,10 +951,10 @@ pub fn sync_scope_agents(
 
             // Case 4: Canonical exists AND prior state exists
             (Some(canon), Some(prev)) => {
-                outcome.total += 1;
                 let canon_rendered = match render_canonical(&canon) {
                     Ok(s) => s,
                     Err(err) => {
+                        outcome.total += 1;
                         diagnostics.push(Diagnostic::error(
                             Some(&scope.path),
                             "render-failed",
@@ -972,6 +982,114 @@ pub fn sync_scope_agents(
                         changed_outputs.push((*t, p.clone(), parsed.clone()));
                     }
                 }
+
+                // Determine whether any previously rendered, still-enabled native output was deleted
+                let mut deleted_outputs: Vec<(Target, PathBuf)> = Vec::new();
+                for (t, dir) in &scope.agent_outputs {
+                    if canon.target_overlay(*t).is_some()
+                        && prev.output_hash(*t).is_some()
+                        && !native_files.contains_key(t)
+                    {
+                        deleted_outputs.push((*t, target_file_path(dir, &name, *t)));
+                    }
+                }
+
+                if !deleted_outputs.is_empty() {
+                    if canon_changed || !changed_outputs.is_empty() {
+                        outcome.total += 1;
+                        diagnostics.push(Diagnostic::warning(
+                            Some(&scope.path),
+                            "agent-delete-conflict",
+                            format!(
+                                "Rendered {} output for agent '{name}' was deleted while canonical or another output was modified.",
+                                deleted_outputs[0].0.as_str()
+                            ),
+                            Some(&deleted_outputs[0].1),
+                        ));
+                        definitions.push(DefinitionRecord {
+                            scope_path: scope_str.clone(),
+                            kind: "agent",
+                            name,
+                            state: "conflict",
+                        });
+                        continue;
+                    }
+
+                    // Unambiguous native output deletion -> propagate deletion to canonical and remaining outputs
+                    let deleted_from: Vec<&str> =
+                        deleted_outputs.iter().map(|(t, _)| t.as_str()).collect();
+                    if !dry_run {
+                        if let Err(e) = fs::remove_file(&canon_path) {
+                            outcome.total += 1;
+                            diagnostics.push(Diagnostic::error(
+                                Some(&scope.path),
+                                "remove-failed",
+                                format!("Failed to remove {}: {e}", canon_path.display()),
+                                Some(&canon_path),
+                            ));
+                            continue;
+                        }
+                        prune_empty_provider_dirs(&scope.canonical_agents, &scope.path, false);
+                        if scope.kind == ScopeKind::User {
+                            outcome.canonical_changed = true;
+                        }
+                        for (_, del_path) in &deleted_outputs {
+                            if let Some(dir) = del_path.parent() {
+                                prune_empty_provider_dirs(
+                                    dir,
+                                    &scope.path,
+                                    scope.kind == ScopeKind::Project,
+                                );
+                            }
+                        }
+                    }
+                    actions.push(ActionRecord {
+                        scope_path: scope_str.clone(),
+                        kind: "agent",
+                        name: name.clone(),
+                        action: "remove",
+                        target: None,
+                        path: canon_path.display().to_string(),
+                        detail: Some(format!("deleted in {}", deleted_from.join(", "))),
+                    });
+
+                    for (t, (p, _, _, _)) in &native_files {
+                        if !dry_run {
+                            if let Err(e) = fs::remove_file(p) {
+                                diagnostics.push(Diagnostic::error(
+                                    Some(&scope.path),
+                                    "remove-failed",
+                                    format!("Failed to remove {}: {e}", p.display()),
+                                    Some(p),
+                                ));
+                                continue;
+                            }
+                            if let Some(dir) = p.parent() {
+                                prune_empty_provider_dirs(
+                                    dir,
+                                    &scope.path,
+                                    scope.kind == ScopeKind::Project,
+                                );
+                            }
+                        }
+                        actions.push(ActionRecord {
+                            scope_path: scope_str.clone(),
+                            kind: "agent",
+                            name: name.clone(),
+                            action: "remove",
+                            target: Some(t.as_str()),
+                            path: p.display().to_string(),
+                            detail: None,
+                        });
+                    }
+                    if !dry_run {
+                        state.remove_agent(&scope.path, &name);
+                        outcome.state_changed = true;
+                    }
+                    continue;
+                }
+
+                outcome.total += 1;
 
                 if canon_changed && !changed_outputs.is_empty() {
                     diagnostics.push(Diagnostic::warning(

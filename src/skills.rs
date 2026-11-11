@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::config::{Scope, ScopeKind, Target};
 use crate::fsx::{
     SkillFileEntry, is_claude_reserved_skill, is_ignored_junk, normalize_lexical,
-    preferred_link_value, read_skill_tree, resolve_symlink_lexical, set_symlink, symlink_points_to,
-    write_skill_tree_exclusive,
+    preferred_link_value, prune_empty_provider_dirs, read_skill_tree, resolve_symlink_lexical,
+    set_symlink, symlink_points_to, write_skill_tree_exclusive,
 };
 use crate::report::{ActionRecord, DefinitionRecord, Diagnostic};
 
@@ -375,15 +375,22 @@ pub fn sync_scope_skills(
                     if let Ok(resolved) = resolve_symlink_lexical(&entry_path)
                         && resolved == normalize_lexical(&canon_dir)
                     {
-                        if !dry_run && let Err(e) = fs::remove_file(&entry_path) {
-                            diagnostics.push(Diagnostic::error(
-                                Some(&scope.path),
-                                "remove-failed",
-                                format!("Failed to remove stale symlink: {e}"),
-                                Some(&entry_path),
-                            ));
-                            had_issue = true;
-                            continue;
+                        if !dry_run {
+                            if let Err(e) = fs::remove_file(&entry_path) {
+                                diagnostics.push(Diagnostic::error(
+                                    Some(&scope.path),
+                                    "remove-failed",
+                                    format!("Failed to remove stale symlink: {e}"),
+                                    Some(&entry_path),
+                                ));
+                                had_issue = true;
+                                continue;
+                            }
+                            prune_empty_provider_dirs(
+                                root,
+                                &scope.path,
+                                scope.kind == ScopeKind::Project,
+                            );
                         }
                         actions.push(ActionRecord {
                             scope_path: scope_str.clone(),

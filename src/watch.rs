@@ -9,13 +9,13 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 
-use crate::config::{EnvPaths, load_config};
+use crate::config::{EnvPaths, ScopeKind, load_config};
 use crate::scope::discover_scopes;
-use crate::state::acquire_lock;
+use crate::state::{StateFile, acquire_lock};
 use crate::sync::run_fleet;
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
-const RESCAN_TICK: Duration = Duration::from_secs(60);
+const RESCAN_TICK: Duration = Duration::from_secs(5);
 
 enum LoopMsg {
     Fs,
@@ -90,7 +90,9 @@ pub fn run_watch(env: &EnvPaths) -> Result<(), String> {
                 last_rescan = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) => {
-                run_cycle(env, service_mode, false);
+                if tick_needs_sync(env) {
+                    run_cycle(env, service_mode, false);
+                }
                 refresh_watches(env, &mut watcher, &mut watched_set);
                 last_rescan = Instant::now();
             }
@@ -162,6 +164,26 @@ fn run_cycle(env: &EnvPaths, service_mode: bool, always_log: bool) {
     }
 }
 
+fn tick_needs_sync(env: &EnvPaths) -> bool {
+    let Ok(report) = run_fleet(env, "watch-check", true, true) else {
+        return true;
+    };
+    if !report.actions.is_empty() || !report.diagnostics.is_empty() {
+        return true;
+    }
+    if let Ok(state) = StateFile::load(&env.state_dir) {
+        let active: BTreeSet<&str> = report.scopes.iter().map(|s| s.path.as_str()).collect();
+        if state.agents.keys().any(|k| !active.contains(k.as_str())) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Watch ONLY dedicated low-churn definition directories (never `$HOME`, `~/.claude`, `~/.codex`,
+/// `~/.gemini`, configured discovery roots, or project build roots, because macOS FSEvents streams
+/// are recursive in CoreServices and would stream every build/cache/session write).
+/// New projects and root `AGENTS.md`/`CLAUDE.md` edits are caught within `RESCAN_TICK` (5s).
 fn refresh_watches(
     env: &EnvPaths,
     watcher: &mut RecommendedWatcher,
@@ -169,42 +191,40 @@ fn refresh_watches(
 ) {
     let mut desired: BTreeSet<(PathBuf, bool)> = BTreeSet::new();
 
+    add_if_dir(&mut desired, &env.user_agents_dir(), true);
+    add_if_dir(&mut desired, &env.gemini_dir.join("config"), true);
+
     if let Ok(cfg) = load_config(env) {
-        for root in &cfg.roots {
-            if root.is_dir() {
-                desired.insert((root.clone(), false));
-            }
-        }
         let mut dummy_diags = Vec::new();
         let scopes = discover_scopes(env, &cfg, &mut dummy_diags);
         for s in scopes {
-            add_if_dir(&mut desired, &s.path, false);
-            add_if_dir(&mut desired, &s.canonical_skills, true);
-            add_if_dir(&mut desired, &s.canonical_agents, true);
-            if let Some(overlord_dir) = s.canonical_agents.parent() {
-                add_if_dir(&mut desired, overlord_dir, false);
-            }
+            let covered_agents_dir = if s.kind == ScopeKind::Project {
+                let dot_agents = s.path.join(".agents");
+                add_if_dir(&mut desired, &dot_agents, true);
+                Some(dot_agents)
+            } else {
+                Some(env.gemini_dir.join("config"))
+            };
             for (_, link_root) in &s.skill_links {
-                add_if_dir(&mut desired, link_root, false);
-                if let Some(parent) = link_root.parent() {
-                    add_if_dir(&mut desired, parent, false);
+                if covered_agents_dir
+                    .as_ref()
+                    .is_some_and(|p| link_root.starts_with(p))
+                {
+                    continue;
                 }
+                add_if_dir(&mut desired, link_root, true);
             }
             for dir in s.agent_outputs.values() {
-                add_if_dir(&mut desired, dir, false);
-                if let Some(parent) = dir.parent() {
-                    add_if_dir(&mut desired, parent, false);
+                if covered_agents_dir
+                    .as_ref()
+                    .is_some_and(|p| dir.starts_with(p))
+                {
+                    continue;
                 }
-            }
-            for (_, link_file) in &s.instruction_links {
-                if let Some(parent) = link_file.parent() {
-                    add_if_dir(&mut desired, parent, false);
-                }
+                add_if_dir(&mut desired, dir, true);
             }
         }
     }
-
-    add_if_dir(&mut desired, &env.user_agents_dir(), false);
 
     for old in current.difference(&desired).cloned().collect::<Vec<_>>() {
         let _ = watcher.unwatch(&old.0);

@@ -6,6 +6,8 @@ use crate::config::{EnvPaths, FleetConfig, Scope, canonical_or_lexical};
 use crate::fsx::{is_claude_reserved_skill, is_ignored_junk};
 use crate::report::Diagnostic;
 
+const MAX_DISCOVERY_DEPTH: usize = 4;
+
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
@@ -81,9 +83,12 @@ fn walk_root(
     project_paths: &mut Vec<PathBuf>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let real = canonical_or_lexical(dir);
-    if is_project_candidate(dir, depth) && seen_real.insert(real) {
+    if is_project_candidate(dir, depth) && seen_real.insert(canonical_or_lexical(dir)) {
         project_paths.push(dir.to_path_buf());
+    }
+
+    if depth >= MAX_DISCOVERY_DEPTH {
+        return;
     }
 
     let rd = match fs::read_dir(dir) {
@@ -124,22 +129,29 @@ fn walk_root(
 }
 
 fn is_project_candidate(dir: &Path, depth: usize) -> bool {
-    let marker_dirs = [
-        (dir.join(".agents").join("skills"), false),
-        (dir.join(".agents").join("overlord").join("agents"), false),
-        (dir.join(".agents").join("agents"), false),
-        (dir.join(".claude").join("skills"), true),
-        (dir.join(".claude").join("agents"), false),
-        (dir.join(".codex").join("agents"), false),
-    ];
-
-    for (marker, is_claude_skills) in marker_dirs {
-        if has_meaningful_entries(&marker, is_claude_skills) {
-            return true;
-        }
+    let dot_agents = dir.join(".agents");
+    if is_physical_dir(&dot_agents)
+        && (has_meaningful_entries(&dot_agents.join("skills"), false)
+            || has_meaningful_entries(&dot_agents.join("overlord").join("agents"), false)
+            || has_meaningful_entries(&dot_agents.join("agents"), false))
+    {
+        return true;
     }
 
-    if depth <= 1
+    let dot_claude = dir.join(".claude");
+    if is_physical_dir(&dot_claude)
+        && (has_meaningful_entries(&dot_claude.join("skills"), true)
+            || has_meaningful_entries(&dot_claude.join("agents"), false))
+    {
+        return true;
+    }
+
+    let dot_codex = dir.join(".codex");
+    if is_physical_dir(&dot_codex) && has_meaningful_entries(&dot_codex.join("agents"), false) {
+        return true;
+    }
+
+    if (depth <= 1 || fs::symlink_metadata(dir.join(".git")).is_ok())
         && (fs::symlink_metadata(dir.join("AGENTS.md")).is_ok()
             || fs::symlink_metadata(dir.join("CLAUDE.md")).is_ok())
     {
@@ -147,6 +159,12 @@ fn is_project_candidate(dir: &Path, depth: usize) -> bool {
     }
 
     false
+}
+
+fn is_physical_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| !m.file_type().is_symlink() && m.is_dir())
+        .unwrap_or(false)
 }
 
 fn has_meaningful_entries(dir: &Path, is_claude_skills: bool) -> bool {

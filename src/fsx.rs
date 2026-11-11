@@ -348,3 +348,16 @@ pub fn write_skill_tree_exclusive(dst: &Path, files: &[SkillFileEntry]) -> Resul
     }
     build
 }
+
+/// Remove `dir` if completely empty, and in project scopes also remove its immediate parent
+/// (e.g. `<project>/.codex`, `<project>/.claude`) if it is a direct child of `scope_root` and empty.
+pub fn prune_empty_provider_dirs(dir: &Path, scope_root: &Path, is_project: bool) {
+    if fs::remove_dir(dir).is_ok()
+        && is_project
+        && let Some(parent) = dir.parent()
+        && parent != scope_root
+        && parent.parent() == Some(scope_root)
+    {
+        let _ = fs::remove_dir(parent);
+    }
+}

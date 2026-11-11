@@ -2,6 +2,16 @@
 
 All notable changes to Overlord are documented here.
 
+## [0.4.2] - 2026-11-11
+
+### Fixed
+
+- Propagate unambiguous deletion of a previously rendered native custom agent file (`.claude/agents/<name>.md`, `.codex/agents/<name>.toml`, or `agy` `.md`) back to canonical `.agents/overlord/agents/<name>.md` and sibling outputs instead of re-rendering it, while raising `agent-delete-conflict` if canonical or another output was concurrently edited.
+- Prune stale project scope entries from `~/.local/state/overlord/state.json` when a project directory is deleted from disk (preserving entries when a configured root is unreadable or unmounted).
+- Prune empty `.codex/agents`, `.codex`, `.claude/skills`, `.claude/agents`, `.claude`, and `.agents/agents` skeleton directories when removing the last skill or custom agent from a project scope.
+- Stop registering `$HOME`, provider session roots (`~/.claude`, `~/.codex`, `~/.gemini`), and build-heavy project roots with macOS `FSEvents`; watch only dedicated definition directories plus a lightweight 5-second read-only rescan check to eliminate background CPU churn and CoreServices memory bloat.
+- Speed up `discover_scopes` by short-circuiting `.agents`/`.claude`/`.codex` checks, deferring `fs::canonicalize` to matched project candidates only, capping walk depth at 4 levels, and discovering nested Git repositories (`depth > 1`) carrying `AGENTS.md` or `CLAUDE.md`.
+
 ## [0.4.1] - 2026-11-11
 
 ### Fixed
@@ -95,7 +105,8 @@ This is a macOS-first prerelease for broader testing. The launchd path has end-t
 - Stops user provider propagation when the required canonical commit fails.
 - Keeps conflicts and invalid definitions visible without choosing a winner.
 
-[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/geekforbrains/overlord/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/geekforbrains/overlord/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/geekforbrains/overlord/compare/v0.3.0-beta.1...v0.4.0
 [0.3.0-beta.1]: https://github.com/geekforbrains/overlord/compare/v0.2.0...v0.3.0-beta.1

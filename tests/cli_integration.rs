@@ -449,3 +449,121 @@ fn watch_propagates_changes_and_stops_cleanly_on_sigterm() {
     let out = child.wait_with_output().expect("wait watch");
     assert!(out.status.success(), "watch exit: {:?}", out.status);
 }
+
+#[test]
+fn native_agent_delete_propagation_state_pruning_and_nested_git_instructions() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path();
+    assert!(run_overlord(home, &["init"]).status.success());
+
+    let projects = home.join("Projects");
+    fs::create_dir_all(&projects).unwrap();
+    fs::write(
+        home.join(".agents/overlord/overlord.yaml"),
+        "roots:\n  - ~/Projects\n",
+    )
+    .unwrap();
+
+    // Project A: single custom agent -> verify native deletion propagates and prunes empty .codex/.claude dirs
+    let proj_a = projects.join("proj-a");
+    fs::create_dir_all(proj_a.join(".agents/overlord/agents")).unwrap();
+    let agent_src = r#"---
+version: 1
+name: temp-agent
+description: Temporary agent.
+targets:
+  claude:
+    model: haiku
+  codex:
+    sandbox_mode: read-only
+  agy:
+    mainAgent: true
+    subagent: true
+    tools:
+      - read_file
+---
+
+Temp instructions.
+"#;
+    fs::write(
+        proj_a.join(".agents/overlord/agents/temp-agent.md"),
+        agent_src,
+    )
+    .unwrap();
+
+    // Project B: will be deleted wholesale -> verify state.json prunes its scope entry
+    let proj_b = projects.join("proj-b");
+    fs::create_dir_all(proj_b.join(".agents/overlord/agents")).unwrap();
+    fs::write(
+        proj_b.join(".agents/overlord/agents/temp-agent.md"),
+        agent_src,
+    )
+    .unwrap();
+
+    // Project C: depth-2 nested git repo with only AGENTS.md
+    let proj_c = projects.join("group/nested-git");
+    fs::create_dir_all(proj_c.join(".git")).unwrap();
+    fs::write(proj_c.join("AGENTS.md"), "# Nested Git Rules\n").unwrap();
+
+    assert!(run_overlord(home, &["sync"]).status.success());
+    assert!(proj_a.join(".claude/agents/temp-agent.md").is_file());
+    assert!(proj_a.join(".codex/agents/temp-agent.toml").is_file());
+    assert!(proj_a.join(".agents/agents/temp-agent.md").is_file());
+    assert_eq!(
+        fs::read_link(proj_c.join("CLAUDE.md")).unwrap(),
+        PathBuf::from("AGENTS.md")
+    );
+
+    // Delete rendered Claude output natively in proj_a -> propagates to canonical, codex, agy, and prunes .codex/.claude!
+    fs::remove_file(proj_a.join(".claude/agents/temp-agent.md")).unwrap();
+    assert!(run_overlord(home, &["sync"]).status.success());
+    assert!(
+        !proj_a
+            .join(".agents/overlord/agents/temp-agent.md")
+            .exists()
+    );
+    assert!(!proj_a.join(".codex/agents/temp-agent.toml").exists());
+    assert!(!proj_a.join(".agents/agents/temp-agent.md").exists());
+    assert!(!proj_a.join(".codex").exists());
+    assert!(!proj_a.join(".claude").exists());
+
+    // Delete entire proj_b directory -> state.json prunes proj_b!
+    fs::remove_dir_all(&proj_b).unwrap();
+    assert!(run_overlord(home, &["sync"]).status.success());
+    let state_raw = fs::read_to_string(home.join(".local/state/overlord/state.json")).unwrap();
+    let state_doc: serde_json::Value = serde_json::from_str(&state_raw).unwrap();
+    let keys: Vec<&str> = state_doc["agents"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.is_empty(),
+        "expected empty state.agents after removing temp agents & proj_b, got {keys:?}"
+    );
+
+    // Re-add agent to proj_a, then delete rendered output WHILE modifying canonical -> conflict!
+    fs::create_dir_all(proj_a.join(".agents/overlord/agents")).unwrap();
+    fs::write(
+        proj_a.join(".agents/overlord/agents/temp-agent.md"),
+        agent_src,
+    )
+    .unwrap();
+    assert!(run_overlord(home, &["sync"]).status.success());
+
+    fs::remove_file(proj_a.join(".claude/agents/temp-agent.md")).unwrap();
+    fs::write(
+        proj_a.join(".agents/overlord/agents/temp-agent.md"),
+        agent_src.replace("Temp instructions.", "Modified canonical instructions."),
+    )
+    .unwrap();
+    let conflict = run_overlord(home, &["sync", "--json"]);
+    assert!(!conflict.status.success());
+    assert!(
+        proj_a
+            .join(".agents/overlord/agents/temp-agent.md")
+            .exists()
+    );
+    assert!(proj_a.join(".codex/agents/temp-agent.toml").exists());
+}

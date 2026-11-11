@@ -55,7 +55,7 @@ overlord service install
 overlord service status
 ```
 
-The LaunchAgent (`io.github.geekforbrains.overlord.watch`) starts automatically on login, watches managed directories with a 750ms debounce, and performs a full fleet rescan every 30 seconds.
+The LaunchAgent (`io.github.geekforbrains.overlord.watch`) starts automatically on login, watches managed directories with a 500ms debounce, and performs a read-only fleet rescan every 5 seconds.
 
 ## 6. Inspect logs or uninstall
 

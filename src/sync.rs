@@ -166,6 +166,27 @@ pub fn run_fleet(
         ));
     }
 
+    // Prune state entries for project scopes that were removed from disk (only when all configured roots were readable)
+    let has_root_errors = diagnostics.iter().any(|d| d.code.ends_with("-root"));
+    if !has_root_errors {
+        let active_scope_keys: std::collections::BTreeSet<String> = scopes
+            .iter()
+            .map(|s| s.path.display().to_string())
+            .collect();
+        let stale_keys: Vec<String> = state
+            .agents
+            .keys()
+            .filter(|k| !active_scope_keys.contains(*k))
+            .cloned()
+            .collect();
+        for key in stale_keys {
+            if !dry_run {
+                state.agents.remove(&key);
+                state_changed = true;
+            }
+        }
+    }
+
     let user_has_canonical_errors = diagnostics.iter().any(|d| {
         d.severity == Severity::Error
             && d.scope_path.as_deref() == Some(env.home.to_string_lossy().as_ref())
