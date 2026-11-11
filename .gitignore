@@ -1,12 +1,8 @@
-node_modules/
-dist/
-coverage/
-*.tgz
+/target/
 *.log
 .env
 .env.*
 !.env.example
-.npmrc
 .claude/settings.local.json
 .idea/
 .vscode/
@@ -14,4 +10,3 @@ coverage/
 *.swo
 *~
 .DS_Store
-PLAN.md

@@ -1,0 +1,32 @@
+[package]
+name = "overlord"
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.91"
+description = "Synchronize Claude Code, OpenAI Codex, and Google Antigravity skills, custom agents, and AGENTS.md across user and project scopes."
+license = "MIT"
+repository = "https://github.com/geekforbrains/overlord"
+readme = "README.md"
+
+[[bin]]
+name = "overlord"
+path = "src/main.rs"
+
+[dependencies]
+hmac-sha256 = "1"
+lexopt = "0.3"
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+serde-saphyr = "2"
+serde_json = { version = "1", features = ["preserve_order"] }
+signal-hook = "0.4"
+toml = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

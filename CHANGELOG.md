@@ -2,11 +2,26 @@
 
 All notable changes to Overlord are documented here.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-11
 
-### Fixed
+### Added
 
-- Leave Claude-managed `synced` and `.trash` skill storage untouched, including case variants and configured Claude roots. Reject canonical collisions and block old ledger operations for these reserved names instead of reporting Claude's containers as invalid local skills.
+- Rewrote Overlord as a single standalone Rust binary (`overlord`) with no Node.js or Python runtime dependency.
+- Added prebuilt macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) release tarballs with SHA-256 checksums and a direct GitHub installer (`install.sh`).
+- Added first-class Google Antigravity CLI (`agy`) support across user and project scopes:
+  - User skills symlinked at `${GEMINI_DIR:-~/.gemini}/config/skills/<name>` (`agy` reads `<project>/.agents/skills/<name>/` natively in trusted workspaces).
+  - Custom agents rendered and 3-way reconciled at `${GEMINI_DIR:-~/.gemini}/config/agents/<name>.md` and `<project>/.agents/agents/<name>.md` via `targets.agy`, enforcing YAML sequence `tools` and `agy`-compatible frontmatter.
+  - User instructions linked at `${GEMINI_DIR:-~/.gemini}/AGENTS.md` (`agy` reads `<project>/AGENTS.md` natively in trusted workspaces).
+- Added automatic `AGENTS.md` / `CLAUDE.md` symlink management across user and discovered project scopes (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/AGENTS.md` -> `../.agents/AGENTS.md`, and `<project>/CLAUDE.md` -> `AGENTS.md`), adopting standalone `CLAUDE.md` files when `AGENTS.md` is absent and preserving delegating `@AGENTS.md` files untouched.
+
+### Changed
+
+- Replaced copied provider skill directories with per-skill symlinks pointing back to each scope's canonical `.agents/skills/<name>/` directory so every skill lives in a single physical folder per scope.
+- Automatically converts identical legacy copied skill directories in `.claude/skills/<name>` and `~/.gemini/config/skills/<name>` into symlinks during `overlord sync`, and adopts standalone physical skills created inside provider skill folders into `.agents/skills/<name>/` before linking.
+- Preserves Claude-managed `skills/synced/` and `skills/.trash/` storage untouched and leaves foreign third-party symlinks in place with explicit warnings.
+- Moved machine-local reconciliation state and singleton locks out of `~/.agents/.git/overlord` into `~/.local/state/overlord/` (or `$XDG_STATE_HOME/overlord/`).
+- Included `~/.agents/AGENTS.md` alongside `skills/` and `overlord/` in automatic user-scope Git commits.
+- Simplified `overlord service` around pinning the single `overlord` executable rather than separate Node and JS entrypoints; the TypeScript implementation remains archived on the `typescript` branch.
 
 ## [0.3.0-beta.1] - 2026-08-12
 
@@ -74,6 +89,7 @@ This is a macOS-first prerelease for broader testing. The launchd path has end-t
 - Stops user provider propagation when the required canonical commit fails.
 - Keeps conflicts and invalid definitions visible without choosing a winner.
 
-[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.3.0-beta.1...HEAD
+[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/geekforbrains/overlord/compare/v0.3.0-beta.1...v0.4.0
 [0.3.0-beta.1]: https://github.com/geekforbrains/overlord/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/geekforbrains/overlord/releases/tag/v0.2.0

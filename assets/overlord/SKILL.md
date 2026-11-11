@@ -1,22 +1,25 @@
 ---
 name: overlord
-description: Set up or migrate an Overlord-managed machine, and create, modify, diagnose, synchronize, watch, or run a per-user auto-sync service for persistent Claude Code and Codex skills and custom agents through their scope-local .agents sources.
+description: Manage local skills, custom agents, AGENTS.md links, and background auto-sync across Claude Code, OpenAI Codex, and Google Antigravity (agy) with Overlord.
 ---
 
-Use Overlord as the storage and synchronization workflow for persistent skills and custom agents. Its status, check, sync, and watch commands always inspect the user scope and every project discovered at or beneath the roots in `~/.agents/overlord/overlord.yaml`, regardless of the current working directory.
+# Overlord
 
-1. Run `overlord status --json` and inspect every reported scope, definition, action, and diagnostic.
-1. Report conflicts, symlinks, and invalid definitions with their `scopePath`, evidence, and filesystem paths. Do not choose a winning side or edit files merely to hide an issue.
-1. Create or intentionally modify requested definitions in the affected scope's `.agents/skills` or `.agents/overlord/agents` directory. Do not move a project definition into the user scope or another project.
-1. Run `overlord sync`. It uses the last-synchronized state to reconcile unambiguous canonical or provider additions, edits, and deletions within each scope; concurrent incompatible changes remain untouched.
-1. Run `overlord check` and report any remaining issue with its exact scope and paths.
+Use `overlord` to synchronize persistent skills, custom agents, and `AGENTS.md` links across Claude Code (`claude`), OpenAI Codex (`codex`), and Google Antigravity (`agy`). Commands inspect the user scope (`~/.agents`) and every project discovered under `roots` in `~/.agents/overlord/overlord.yaml`, regardless of the current working directory.
 
-On a machine with existing definitions, treat `status --json` as the dry run; there is no `--dry-run` flag. If it fails because the dedicated `~/.agents` repository is absent or the configuration is invalid, inventory the current canonical and provider-native paths before changing anything. `init` validates an existing configuration before creating the repository, so migrate legacy configuration to the exact `roots:` format only with the user's approval, then run `overlord init`. Initialization captures existing user canonical definitions in its first managed commit, installs the bundled Overlord skill only when absent, and does not overwrite a modified installed copy.
+## Workflow
 
-Before the first `sync`, review every planned write and removal. A definition that differs across locations without a baseline is a conflict: obtain an explicit choice, preserve the losing copy outside all managed roots, make the authorized edit, and rerun `status --json`. After synchronization, run `overlord check` and review any project or provider working-tree changes that Overlord intentionally does not commit.
+1. Run `overlord status --json` (or `overlord sync --dry-run`) to inspect scopes, planned actions, and diagnostics.
+2. Author or edit canonical definitions in the target scope:
+   - **Skills:** `<scope>/.agents/skills/<name>/SKILL.md` (physical files only; Overlord creates per-skill symlinks for Claude and user-level `agy`, while Codex and project-level `agy` read `.agents/skills` directly).
+   - **Custom agents:** `<scope>/.agents/overlord/agents/<name>.md` (`version: 1`, `name`, `description`, and `targets: { claude, codex, agy }`). Overlord renders native files to `.claude/agents/<name>.md`, `.codex/agents/<name>.toml`, and `~/.gemini/config/agents/<name>.md` or `<repo>/.agents/agents/<name>.md`.
+   - **Instructions:** `~/.agents/AGENTS.md` (user) or `<repo>/AGENTS.md` (project). Overlord maintains `CLAUDE.md` and user-level `.codex/AGENTS.md` / `.gemini/AGENTS.md` symlinks.
+3. Run `overlord sync` to apply changes, capture unambiguous edits made to rendered agent files or newly created provider skills, and auto-commit managed user-scope changes in `~/.agents`.
+4. Run `overlord check` (exits `0` only when the fleet has zero conflicts, errors, or pending actions).
 
-Use `overlord watch` for a foreground macOS/Linux watcher. With explicit permission to manage a login service, first require a clean `overlord check` and stop any foreground or `tmux` watcher, then run `overlord service install --dry-run`. Review its exact absolute Node, Git, and CLI paths, allowlisted environment, generated plist or unit, state paths, logs, and manager commands before running `overlord service install`. Confirm with `overlord service status` and `overlord service logs`. Service commands are human-only; they do not support `--json`. The service is per-user, never root or system-wide, and Linux installation does not enable lingering. Reinstall after moving or upgrading the pinned Node or CLI runtime. `service uninstall` removes only an unchanged Overlord-owned service definition and receipt; it preserves definitions, configuration, ledger state, Git history, project files, and logs.
+## Guardrails
 
-When authoring while a watcher is active, prepare a complete definition before renaming it into a managed artifact root; an observed empty or partially written definition is preserved and reported as invalid until a later event or periodic scan sees the completed content. Treat `service logs` as bounded history: old errors can remain after recovery, so use current `overlord check` and `service status` as the health decision.
-
-Use provider-native skill and agent authoring guidance for content quality. Each scope's physical `.agents` definitions are canonical after synchronization, while tracked `.claude` and `.codex` files may supply provider-originated changes. Overlord creates deterministic Git commits only in the user source at `~/.agents`; it never commits a project repository or relies on an agent to compose commits. Symlinks are unsupported anywhere in managed artifact roots or definitions. Do not infer permission to initialize or migrate a machine, resolve conflicts, rewrite invalid definitions, delete definitions, change fleet roots, or install, reinstall, or uninstall the background service.
+- Report conflicts or invalid definitions with their exact scope and paths; never guess a conflict winner or overwrite diverging files without explicit user approval.
+- Never place symlinks inside canonical `.agents/skills/` or `.agents/overlord/agents/`; Overlord owns the outbound symlinks in provider directories.
+- Overlord commits managed changes only in `~/.agents` and never pushes or commits project repositories.
+- Use `overlord watch` for foreground auto-sync, or `overlord service install [--dry-run]`, `overlord service status`, `overlord service logs`, and `overlord service uninstall` for the per-user background service (`launchd` on macOS, `systemd --user` on Linux). Re-run `overlord service install` after moving or upgrading the `overlord` binary.
