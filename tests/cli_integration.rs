@@ -505,6 +505,14 @@ Temp instructions.
     fs::create_dir_all(proj_c.join(".git")).unwrap();
     fs::write(proj_c.join("AGENTS.md"), "# Nested Git Rules\n").unwrap();
 
+    // Project D: team repo whose CLAUDE.md layers Claude-specific rules on top of [AGENTS.md](AGENTS.md)
+    let proj_d = projects.join("group/team-layered");
+    fs::create_dir_all(proj_d.join(".git")).unwrap();
+    fs::write(proj_d.join("AGENTS.md"), "# Shared Team Guidelines\n").unwrap();
+    let layered_claude =
+        "See [AGENTS.md](AGENTS.md) for codebase orientation.\n\n- Claude extra rule\n";
+    fs::write(proj_d.join("CLAUDE.md"), layered_claude).unwrap();
+
     assert!(run_overlord(home, &["sync"]).status.success());
     assert!(proj_a.join(".claude/agents/temp-agent.md").is_file());
     assert!(proj_a.join(".codex/agents/temp-agent.toml").is_file());
@@ -512,6 +520,16 @@ Temp instructions.
     assert_eq!(
         fs::read_link(proj_c.join("CLAUDE.md")).unwrap(),
         PathBuf::from("AGENTS.md")
+    );
+    assert!(
+        !fs::symlink_metadata(proj_d.join("CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(proj_d.join("CLAUDE.md")).unwrap(),
+        layered_claude
     );
 
     // Delete rendered Claude output natively in proj_a -> propagates to canonical, codex, agy, and prunes .codex/.claude!

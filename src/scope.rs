@@ -6,7 +6,7 @@ use crate::config::{EnvPaths, FleetConfig, Scope, canonical_or_lexical};
 use crate::fsx::{is_claude_reserved_skill, is_ignored_junk};
 use crate::report::Diagnostic;
 
-const MAX_DISCOVERY_DEPTH: usize = 4;
+const MAX_DISCOVERY_DEPTH: usize = 3;
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",

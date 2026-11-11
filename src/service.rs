@@ -235,10 +235,10 @@ WantedBy=default.target
 
 pub fn service_install(env: &EnvPaths, dry_run: bool) -> Result<(), String> {
     let platform = Platform::current()?;
-    let check_report = run_fleet(env, "check", true, true)?;
+    let check_report = run_fleet(env, "check", true, false)?;
     if !check_report.ok {
         return Err(
-            "Fleet baseline is not clean; run 'overlord sync' and 'overlord check' before installing the service."
+            "Fleet has conflicts or validation errors; run 'overlord check' and resolve issues before installing the service."
                 .to_string(),
         );
     }

@@ -136,8 +136,8 @@ pub fn sync_scope_instructions(
                                 detail: Some(format!("-> {}", desired_val.display())),
                             });
                         }
-                        Ok(bytes) if is_delegating_claude_import(&bytes, *target) => {
-                            // e.g. upstream repos whose CLAUDE.md is literally `@AGENTS.md`
+                        Ok(bytes) if delegates_to_agents_md(&bytes, *target) => {
+                            // Upstream or team repos whose CLAUDE.md explicitly delegates to or layers on AGENTS.md
                         }
                         Ok(_) => {
                             had_issue = true;
@@ -343,4 +343,14 @@ fn is_delegating_claude_import(bytes: &[u8], target: Target) -> bool {
         return false;
     };
     matches!(s.trim(), "@AGENTS.md" | "@./AGENTS.md")
+}
+
+fn delegates_to_agents_md(bytes: &[u8], target: Target) -> bool {
+    if target != Target::Claude {
+        return false;
+    }
+    let Ok(s) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    s.contains("AGENTS.md")
 }

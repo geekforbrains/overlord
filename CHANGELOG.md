@@ -2,6 +2,13 @@
 
 All notable changes to Overlord are documented here.
 
+## [0.4.3] - 2026-11-11
+
+### Fixed
+
+- Treat project `CLAUDE.md` files that explicitly reference `AGENTS.md` (e.g. `See [AGENTS.md](AGENTS.md)...`) as intentional layered instructions rather than `instructions-conflict` warnings, while still flagging unrelated diverging `CLAUDE.md` files.
+- Allow `overlord service install` (and `install.sh` upgrades) to proceed when the fleet has pending non-conflicting sync actions so the newly started watcher immediately reconciles them, blocking only on conflicts or validation errors.
+
 ## [0.4.2] - 2026-11-11
 
 ### Fixed
@@ -105,7 +112,8 @@ This is a macOS-first prerelease for broader testing. The launchd path has end-t
 - Stops user provider propagation when the required canonical commit fails.
 - Keeps conflicts and invalid definitions visible without choosing a winner.
 
-[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/geekforbrains/overlord/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/geekforbrains/overlord/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/geekforbrains/overlord/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/geekforbrains/overlord/compare/v0.3.0-beta.1...v0.4.0
