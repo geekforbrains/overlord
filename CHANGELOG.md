@@ -2,6 +2,12 @@
 
 All notable changes to Overlord are documented here.
 
+## [0.4.1] - 2026-11-11
+
+### Fixed
+
+- Run `launchctl enable` before `launchctl bootstrap` during `overlord service install` on macOS so LaunchAgents previously disabled by `service uninstall` re-bootstrap cleanly without I/O error 5, and write the `service.json` ownership receipt alongside the generated unit.
+
 ## [0.4.0] - 2026-11-11
 
 ### Added
@@ -89,7 +95,8 @@ This is a macOS-first prerelease for broader testing. The launchd path has end-t
 - Stops user provider propagation when the required canonical commit fails.
 - Keeps conflicts and invalid definitions visible without choosing a winner.
 
-[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/geekforbrains/overlord/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/geekforbrains/overlord/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/geekforbrains/overlord/compare/v0.3.0-beta.1...v0.4.0
 [0.3.0-beta.1]: https://github.com/geekforbrains/overlord/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/geekforbrains/overlord/releases/tag/v0.2.0

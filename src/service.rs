@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::EnvPaths;
-use crate::fsx::write_atomic;
+use crate::fsx::{sha256_hex, write_atomic};
 use crate::git::resolve_git_bin;
 use crate::sync::run_fleet;
 
@@ -38,9 +38,11 @@ pub struct ServicePlan {
     pub exe_path: PathBuf,
     pub git_path: PathBuf,
     pub definition_path: PathBuf,
+    pub receipt_path: PathBuf,
     pub stdout_log: Option<PathBuf>,
     pub stderr_log: Option<PathBuf>,
     pub rendered: String,
+    pub digest: String,
 }
 
 pub fn build_service_plan(env: &EnvPaths, platform: Platform) -> Result<ServicePlan, String> {
@@ -108,17 +110,26 @@ pub fn build_service_plan(env: &EnvPaths, platform: Platform) -> Result<ServiceP
                 .join("Library")
                 .join("LaunchAgents")
                 .join(format!("{LAUNCHD_LABEL}.plist"));
+            let receipt_path = env
+                .home
+                .join("Library")
+                .join("Application Support")
+                .join("Overlord")
+                .join("service.json");
             let log_dir = env.home.join("Library").join("Logs").join("Overlord");
             let stdout_log = log_dir.join("watch.log");
             let stderr_log = log_dir.join("watch-error.log");
             let rendered = render_launchd_plist(&current_exe, &env_vars, &stdout_log, &stderr_log);
+            let digest = sha256_hex(rendered.as_bytes());
             Ok(ServicePlan {
                 exe_path: current_exe,
                 git_path,
                 definition_path: def_path,
+                receipt_path,
                 stdout_log: Some(stdout_log),
                 stderr_log: Some(stderr_log),
                 rendered,
+                digest,
             })
         }
         Platform::Linux => {
@@ -127,14 +138,18 @@ pub fn build_service_plan(env: &EnvPaths, platform: Platform) -> Result<ServiceP
                 .join("systemd")
                 .join("user")
                 .join(SYSTEMD_UNIT);
+            let receipt_path = env.state_dir.join("service.json");
             let rendered = render_systemd_unit(&current_exe, &env_vars);
+            let digest = sha256_hex(rendered.as_bytes());
             Ok(ServicePlan {
                 exe_path: current_exe,
                 git_path,
                 definition_path: def_path,
+                receipt_path,
                 stdout_log: None,
                 stderr_log: None,
                 rendered,
+                digest,
             })
         }
     }
@@ -246,6 +261,16 @@ pub fn service_install(env: &EnvPaths, dry_run: bool) -> Result<(), String> {
             .map_err(|e| format!("Failed to create log directory {}: {e}", parent.display()))?;
     }
 
+    let receipt_json = serde_json::json!({
+        "version": 3,
+        "executable": plan.exe_path.display().to_string(),
+        "definitionPath": plan.definition_path.display().to_string(),
+        "definitionDigest": plan.digest,
+    });
+    let mut receipt_bytes = serde_json::to_vec_pretty(&receipt_json)
+        .map_err(|e| format!("Failed to serialize service receipt: {e}"))?;
+    receipt_bytes.push(b'\n');
+
     match platform {
         Platform::MacOs => {
             let domain = format!("gui/{}", current_uid());
@@ -258,17 +283,20 @@ pub fn service_install(env: &EnvPaths, dry_run: bool) -> Result<(), String> {
             }
 
             write_atomic(&plan.definition_path, plan.rendered.as_bytes(), Some(0o600))?;
+            write_atomic(&plan.receipt_path, &receipt_bytes, Some(0o600))?;
 
-            bootstrap_launchd_with_retry(&domain, &plan.definition_path)?;
+            // Enable BEFORE bootstrap so a previously disabled LaunchAgent label can load cleanly.
             let _ = Command::new("launchctl")
                 .args(["enable", &service_target])
                 .output();
+            bootstrap_launchd_with_retry(&domain, &plan.definition_path)?;
             let _ = Command::new("launchctl")
                 .args(["kickstart", "-k", &service_target])
                 .output();
         }
         Platform::Linux => {
             write_atomic(&plan.definition_path, plan.rendered.as_bytes(), Some(0o600))?;
+            write_atomic(&plan.receipt_path, &receipt_bytes, Some(0o600))?;
             run_systemctl(&["daemon-reload"])?;
             run_systemctl(&["enable", "--now", SYSTEMD_UNIT])?;
             run_systemctl(&["restart", SYSTEMD_UNIT])?;
@@ -285,6 +313,7 @@ pub fn service_uninstall(env: &EnvPaths) -> Result<(), String> {
     let plan = build_service_plan(env, platform)?;
 
     if fs::symlink_metadata(&plan.definition_path).is_err() {
+        let _ = fs::remove_file(&plan.receipt_path);
         println!("service uninstall: ok (not installed)");
         return Ok(());
     }
@@ -300,13 +329,18 @@ pub fn service_uninstall(env: &EnvPaths) -> Result<(), String> {
                     .output();
                 wait_launchd_unloaded(&service_target);
             }
+            let _ = Command::new("launchctl")
+                .args(["disable", &service_target])
+                .output();
             fs::remove_file(&plan.definition_path)
                 .map_err(|e| format!("Failed to remove {}: {e}", plan.definition_path.display()))?;
+            let _ = fs::remove_file(&plan.receipt_path);
         }
         Platform::Linux => {
             let _ = run_systemctl(&["disable", "--now", SYSTEMD_UNIT]);
             fs::remove_file(&plan.definition_path)
                 .map_err(|e| format!("Failed to remove {}: {e}", plan.definition_path.display()))?;
+            let _ = fs::remove_file(&plan.receipt_path);
             let _ = run_systemctl(&["daemon-reload"]);
         }
     }
